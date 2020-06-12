@@ -2048,14 +2048,20 @@ pub(crate) fn is_nonoverlapping<T>(src: *const T, dst: *const T, count: usize) -
 #[stable(feature = "rust1", since = "1.0.0")]
 #[inline]
 pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
-    extern "rust-intrinsic" {
+    /*extern "rust-intrinsic" {
         fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize);
-    }
+    }*/
 
     debug_assert!(is_aligned_and_not_null(src), "attempt to copy from unaligned or null pointer");
     debug_assert!(is_aligned_and_not_null(dst), "attempt to copy to unaligned or null pointer");
     debug_assert!(is_nonoverlapping(src, dst, count), "attempt to copy to overlapping memory");
-    copy_nonoverlapping(src, dst, count)
+    //copy_nonoverlapping(src, dst, count)
+
+    let src_buf = crate::slice::from_raw_parts(src as *const u8, count * crate::mem::size_of::<T>());
+    let dst_buf = crate::slice::from_raw_parts_mut(dst as *mut u8, count * crate::mem::size_of::<T>());
+    for (s, d) in src_buf.iter().zip(dst_buf.iter_mut()) {
+        *d = *s;
+    }
 }
 
 /// Copies `count * size_of::<T>()` bytes from `src` to `dst`. The source
