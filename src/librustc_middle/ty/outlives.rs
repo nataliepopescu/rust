@@ -70,7 +70,7 @@ fn compute_components(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, out: &mut SmallVec<[Compo
                 // consistent with previous (accidental) behavior.
                 // See https://github.com/rust-lang/rust/issues/70917
                 // for further background and discussion.
-                for &child in substs {
+                for child in substs {
                     match child.unpack() {
                         GenericArgKind::Type(ty) => {
                             compute_components(tcx, ty, out);
@@ -81,6 +81,11 @@ fn compute_components(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, out: &mut SmallVec<[Compo
                         }
                     }
                 }
+            }
+
+            ty::Array(element, _) => {
+                // Don't look into the len const as it doesn't affect regions
+                compute_components(tcx, element, out);
             }
 
             ty::Closure(_, ref substs) => {
@@ -158,7 +163,6 @@ fn compute_components(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, out: &mut SmallVec<[Compo
             ty::Opaque(..) |      // OutlivesNominalType (ish)
             ty::Foreign(..) |     // OutlivesNominalType
             ty::Str |             // OutlivesScalar (ish)
-            ty::Array(..) |       // ...
             ty::Slice(..) |       // ...
             ty::RawPtr(..) |      // ...
             ty::Ref(..) |         // OutlivesReference
@@ -167,7 +171,7 @@ fn compute_components(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, out: &mut SmallVec<[Compo
             ty::Dynamic(..) |     // OutlivesObject, OutlivesFragment (*)
             ty::Placeholder(..) |
             ty::Bound(..) |
-            ty::Error => {
+            ty::Error(_) => {
                 // (*) Function pointers and trait objects are both binders.
                 // In the RFC, this means we would add the bound regions to
                 // the "bound regions list".  In our representation, no such

@@ -87,7 +87,7 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
     ) -> CanonicalVarValues<'tcx> {
         let var_values: IndexVec<BoundVar, GenericArg<'tcx>> = variables
             .iter()
-            .map(|info| self.instantiate_canonical_var(span, *info, &universe_map))
+            .map(|info| self.instantiate_canonical_var(span, info, &universe_map))
             .collect();
 
         CanonicalVarValues { var_values }
@@ -154,7 +154,7 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
                 self.tcx
                     .mk_const(ty::Const {
                         val: ty::ConstKind::Placeholder(placeholder_mapped),
-                        ty: self.tcx.types.err, // FIXME(const_generics)
+                        ty: self.tcx.ty_error(), // FIXME(const_generics)
                     })
                     .into()
             }

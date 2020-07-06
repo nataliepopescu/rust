@@ -60,15 +60,16 @@ impl<'tcx> MirPass<'tcx> for PromoteTemps<'tcx> {
             return;
         }
 
-        let def_id = src.def_id();
+        let def_id = src.def_id().expect_local();
 
         let mut rpo = traversal::reverse_postorder(body);
-        let ccx = ConstCx::new(tcx, def_id.expect_local(), body);
+        let ccx = ConstCx::new(tcx, def_id, body);
         let (temps, all_candidates) = collect_temps_and_candidates(&ccx, &mut rpo);
 
         let promotable_candidates = validate_candidates(&ccx, &temps, &all_candidates);
 
-        let promoted = promote_candidates(def_id, body, tcx, temps, promotable_candidates);
+        let promoted =
+            promote_candidates(def_id.to_def_id(), body, tcx, temps, promotable_candidates);
         self.promoted_fragments.set(promoted);
     }
 }
@@ -113,6 +114,9 @@ pub enum Candidate {
     /// the attribute currently provides the semantic requirement that arguments
     /// must be constant.
     Argument { bb: BasicBlock, index: usize },
+
+    /// `const` operand in asm!.
+    InlineAsm { bb: BasicBlock, index: usize },
 }
 
 impl Candidate {
@@ -120,7 +124,7 @@ impl Candidate {
     fn forces_explicit_promotion(&self) -> bool {
         match self {
             Candidate::Ref(_) | Candidate::Repeat(_) => false,
-            Candidate::Argument { .. } => true,
+            Candidate::Argument { .. } | Candidate::InlineAsm { .. } => true,
         }
     }
 }
@@ -144,7 +148,6 @@ struct Collector<'a, 'tcx> {
     ccx: &'a ConstCx<'a, 'tcx>,
     temps: IndexVec<Local, TempState>,
     candidates: Vec<Candidate>,
-    span: Span,
 }
 
 impl<'tcx> Visitor<'tcx> for Collector<'_, 'tcx> {
@@ -213,33 +216,43 @@ impl<'tcx> Visitor<'tcx> for Collector<'_, 'tcx> {
         }
     }
 
-    fn visit_terminator_kind(&mut self, kind: &TerminatorKind<'tcx>, location: Location) {
-        self.super_terminator_kind(kind, location);
+    fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
+        self.super_terminator(terminator, location);
 
-        if let TerminatorKind::Call { ref func, .. } = *kind {
-            if let ty::FnDef(def_id, _) = func.ty(self.ccx.body, self.ccx.tcx).kind {
-                let fn_sig = self.ccx.tcx.fn_sig(def_id);
-                if let Abi::RustIntrinsic | Abi::PlatformIntrinsic = fn_sig.abi() {
-                    let name = self.ccx.tcx.item_name(def_id);
-                    // FIXME(eddyb) use `#[rustc_args_required_const(2)]` for shuffles.
-                    if name.as_str().starts_with("simd_shuffle") {
-                        self.candidates.push(Candidate::Argument { bb: location.block, index: 2 });
+        match terminator.kind {
+            TerminatorKind::Call { ref func, .. } => {
+                if let ty::FnDef(def_id, _) = func.ty(self.ccx.body, self.ccx.tcx).kind {
+                    let fn_sig = self.ccx.tcx.fn_sig(def_id);
+                    if let Abi::RustIntrinsic | Abi::PlatformIntrinsic = fn_sig.abi() {
+                        let name = self.ccx.tcx.item_name(def_id);
+                        // FIXME(eddyb) use `#[rustc_args_required_const(2)]` for shuffles.
+                        if name.as_str().starts_with("simd_shuffle") {
+                            self.candidates
+                                .push(Candidate::Argument { bb: location.block, index: 2 });
 
-                        return; // Don't double count `simd_shuffle` candidates
+                            return; // Don't double count `simd_shuffle` candidates
+                        }
                     }
-                }
 
-                if let Some(constant_args) = args_required_const(self.ccx.tcx, def_id) {
-                    for index in constant_args {
-                        self.candidates.push(Candidate::Argument { bb: location.block, index });
+                    if let Some(constant_args) = args_required_const(self.ccx.tcx, def_id) {
+                        for index in constant_args {
+                            self.candidates.push(Candidate::Argument { bb: location.block, index });
+                        }
                     }
                 }
             }
+            TerminatorKind::InlineAsm { ref operands, .. } => {
+                for (index, op) in operands.iter().enumerate() {
+                    match op {
+                        InlineAsmOperand::Const { .. } => {
+                            self.candidates.push(Candidate::InlineAsm { bb: location.block, index })
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
-    }
-
-    fn visit_source_info(&mut self, source_info: &SourceInfo) {
-        self.span = source_info.span;
     }
 }
 
@@ -250,7 +263,6 @@ pub fn collect_temps_and_candidates(
     let mut collector = Collector {
         temps: IndexVec::from_elem(TempState::Undefined, &ccx.body.local_decls),
         candidates: vec![],
-        span: ccx.body.span,
         ccx,
     };
     for (bb, data) in rpo {
@@ -323,14 +335,14 @@ impl<'tcx> Validator<'_, 'tcx> {
                             // `let _: &'static _ = &(Cell::new(1), 2).1;`
                             let mut place_projection = &place.projection[..];
                             // FIXME(eddyb) use a forward loop instead of a reverse one.
-                            while let [proj_base @ .., elem] = place_projection {
+                            while let &[ref proj_base @ .., elem] = place_projection {
                                 // FIXME(eddyb) this is probably excessive, with
                                 // the exception of `union` member accesses.
                                 let ty =
                                     Place::ty_from(place.local, proj_base, self.body, self.tcx)
                                         .projection_ty(self.tcx, elem)
                                         .ty;
-                                if ty.is_freeze(self.tcx, self.param_env, DUMMY_SP) {
+                                if ty.is_freeze(self.tcx.at(DUMMY_SP), self.param_env) {
                                     has_mut_interior = false;
                                     break;
                                 }
@@ -399,6 +411,18 @@ impl<'tcx> Validator<'_, 'tcx> {
                 let terminator = self.body[bb].terminator();
                 match &terminator.kind {
                     TerminatorKind::Call { args, .. } => self.validate_operand(&args[index]),
+                    _ => bug!(),
+                }
+            }
+            Candidate::InlineAsm { bb, index } => {
+                assert!(self.explicit);
+
+                let terminator = self.body[bb].terminator();
+                match &terminator.kind {
+                    TerminatorKind::InlineAsm { operands, .. } => match &operands[index] {
+                        InlineAsmOperand::Const { value } => self.validate_operand(value),
+                        _ => bug!(),
+                    },
                     _ => bug!(),
                 }
             }
@@ -574,6 +598,8 @@ impl<'tcx> Validator<'_, 'tcx> {
         }
 
         match rvalue {
+            Rvalue::ThreadLocalRef(_) => Err(Unpromotable),
+
             Rvalue::NullaryOp(..) => Ok(()),
 
             Rvalue::Discriminant(place) | Rvalue::Len(place) => self.validate_place(place.as_ref()),
@@ -647,13 +673,13 @@ impl<'tcx> Validator<'_, 'tcx> {
                 if has_mut_interior {
                     let mut place_projection = place.projection;
                     // FIXME(eddyb) use a forward loop instead of a reverse one.
-                    while let [proj_base @ .., elem] = place_projection {
+                    while let &[ref proj_base @ .., elem] = place_projection {
                         // FIXME(eddyb) this is probably excessive, with
                         // the exception of `union` member accesses.
                         let ty = Place::ty_from(place.local, proj_base, self.body, self.tcx)
                             .projection_ty(self.tcx, elem)
                             .ty;
-                        if ty.is_freeze(self.tcx, self.param_env, DUMMY_SP) {
+                        if ty.is_freeze(self.tcx.at(DUMMY_SP), self.param_env) {
                             has_mut_interior = false;
                             break;
                         }
@@ -699,7 +725,7 @@ impl<'tcx> Validator<'_, 'tcx> {
             ty::FnDef(def_id, _) => {
                 is_const_fn(self.tcx, def_id)
                     || is_unstable_const_fn(self.tcx, def_id).is_some()
-                    || is_lang_panic_fn(self.tcx, self.def_id)
+                    || is_lang_panic_fn(self.tcx, self.def_id.to_def_id())
             }
             _ => false,
         };
@@ -747,7 +773,9 @@ pub fn validate_candidates(
             }
 
             match candidate {
-                Candidate::Argument { bb, index } if !is_promotable => {
+                Candidate::Argument { bb, index } | Candidate::InlineAsm { bb, index }
+                    if !is_promotable =>
+                {
                     let span = ccx.body[bb].terminator().source_info.span;
                     let msg = format!("argument {} is required to be a constant", index + 1);
                     ccx.tcx.sess.span_err(span, &msg);
@@ -876,7 +904,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
             };
 
             match terminator.kind {
-                TerminatorKind::Call { mut func, mut args, from_hir_call, .. } => {
+                TerminatorKind::Call { mut func, mut args, from_hir_call, fn_span, .. } => {
                     self.visit_operand(&mut func, loc);
                     for arg in &mut args {
                         self.visit_operand(arg, loc);
@@ -892,6 +920,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                             cleanup: None,
                             destination: Some((Place::from(new_temp), new_target)),
                             from_hir_call,
+                            fn_span,
                         },
                         ..terminator
                     };
@@ -1024,6 +1053,24 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                         _ => bug!(),
                     }
                 }
+                Candidate::InlineAsm { bb, index } => {
+                    let terminator = blocks[bb].terminator_mut();
+                    match terminator.kind {
+                        TerminatorKind::InlineAsm { ref mut operands, .. } => {
+                            match &mut operands[index] {
+                                InlineAsmOperand::Const { ref mut value } => {
+                                    let ty = value.ty(local_decls, self.tcx);
+                                    let span = terminator.source_info.span;
+
+                                    Rvalue::Use(mem::replace(value, promoted_operand(ty, span)))
+                                }
+                                _ => bug!(),
+                            }
+                        }
+
+                        _ => bug!(),
+                    }
+                }
             }
         };
 
@@ -1080,7 +1127,7 @@ pub fn promote_candidates<'tcx>(
                     }
                 }
             }
-            Candidate::Argument { .. } => {}
+            Candidate::Argument { .. } | Candidate::InlineAsm { .. } => {}
         }
 
         // Declare return place local so that `mir::Body::new` doesn't complain.
@@ -1096,7 +1143,6 @@ pub fn promote_candidates<'tcx>(
             0,
             vec![],
             body.span,
-            vec![],
             body.generator_kind,
         );
         promoted.ignore_interior_mut_in_const_validation = true;
@@ -1140,7 +1186,7 @@ pub fn promote_candidates<'tcx>(
             _ => true,
         });
         let terminator = block.terminator_mut();
-        if let TerminatorKind::Drop { location: place, target, .. } = &terminator.kind {
+        if let TerminatorKind::Drop { place, target, .. } = &terminator.kind {
             if let Some(index) = place.as_local() {
                 if promoted(index) {
                     terminator.kind = TerminatorKind::Goto { target: *target };

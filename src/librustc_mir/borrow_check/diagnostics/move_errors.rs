@@ -331,7 +331,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 self.cannot_move_out_of_interior_noncopy(span, ty, None)
             }
             ty::Closure(def_id, closure_substs)
-                if def_id == self.mir_def_id && upvar_field.is_some() =>
+                if def_id.as_local() == Some(self.mir_def_id) && upvar_field.is_some() =>
             {
                 let closure_kind_ty = closure_substs.as_closure().kind_ty();
                 let closure_kind = closure_kind_ty.to_opt_closure_kind();
@@ -408,7 +408,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     format!("{}.as_ref()", snippet),
                     Applicability::MaybeIncorrect,
                 );
-            } else if span.is_desugaring(DesugaringKind::ForLoop)
+            } else if matches!(span.desugaring_kind(), Some(DesugaringKind::ForLoop(_)))
                 && self.infcx.tcx.is_diagnostic_item(Symbol::intern("vec_type"), def_id)
             {
                 // FIXME: suggest for anything that implements `IntoIterator`.

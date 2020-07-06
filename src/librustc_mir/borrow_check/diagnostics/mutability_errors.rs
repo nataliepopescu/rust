@@ -365,7 +365,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                                     opt_assignment_rhs_span.and_then(|span| span.desugaring_kind());
                                 match opt_desugaring_kind {
                                     // on for loops, RHS points to the iterator part
-                                    Some(DesugaringKind::ForLoop) => Some((
+                                    Some(DesugaringKind::ForLoop(_)) => Some((
                                         false,
                                         opt_assignment_rhs_span.unwrap(),
                                         format!(
@@ -492,10 +492,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         err.span_label(sp, format!("cannot {}", act));
 
         let hir = self.infcx.tcx.hir();
-        let closure_id = hir.as_local_hir_id(self.mir_def_id.expect_local());
+        let closure_id = hir.as_local_hir_id(self.mir_def_id);
         let fn_call_id = hir.get_parent_node(closure_id);
         let node = hir.get(fn_call_id);
-        let item_id = hir.get_parent_item(fn_call_id);
+        let item_id = hir.enclosing_body_owner(fn_call_id);
         let mut look_at_return = true;
         // If we can detect the expression to be an `fn` call where the closure was an argument,
         // we point at the `fn` definition argument...

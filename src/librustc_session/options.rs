@@ -3,11 +3,10 @@ use crate::config::*;
 use crate::early_error;
 use crate::lint;
 use crate::search_paths::SearchPath;
-use crate::utils::NativeLibraryKind;
+use crate::utils::NativeLibKind;
 
-use rustc_target::spec::TargetTriple;
-use rustc_target::spec::{LinkerFlavor, MergeFunctions, PanicStrategy};
-use rustc_target::spec::{RelocModel, RelroLevel, TlsModel};
+use rustc_target::spec::{CodeModel, LinkerFlavor, MergeFunctions, PanicStrategy};
+use rustc_target::spec::{RelocModel, RelroLevel, TargetTriple, TlsModel};
 
 use rustc_feature::UnstableFeatures;
 use rustc_span::edition::Edition;
@@ -94,7 +93,7 @@ top_level_options!(
         describe_lints: bool [UNTRACKED],
         output_types: OutputTypes [TRACKED],
         search_paths: Vec<SearchPath> [UNTRACKED],
-        libs: Vec<(String, Option<String>, Option<NativeLibraryKind>)> [TRACKED],
+        libs: Vec<(String, Option<String>, NativeLibKind)> [TRACKED],
         maybe_sysroot: Option<PathBuf> [UNTRACKED],
 
         target_triple: TargetTriple [TRACKED],
@@ -249,10 +248,10 @@ macro_rules! options {
         pub const parse_passes: &str = "a space-separated list of passes, or `all`";
         pub const parse_panic_strategy: &str = "either `unwind` or `abort`";
         pub const parse_relro_level: &str = "one of: `full`, `partial`, or `off`";
-        pub const parse_sanitizer: &str = "one of: `address`, `leak`, `memory` or `thread`";
-        pub const parse_sanitizer_list: &str = "comma separated list of sanitizers";
+        pub const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `leak`, `memory` or `thread`";
         pub const parse_sanitizer_memory_track_origins: &str = "0, 1, or 2";
-        pub const parse_cfguard: &str = "either `disabled`, `nochecks`, or `checks`";
+        pub const parse_cfguard: &str =
+            "either a boolean (`yes`, `no`, `on`, `off`, etc), `checks`, or `nochecks`";
         pub const parse_strip: &str = "either `none`, `debuginfo`, or `symbols`";
         pub const parse_linker_flavor: &str = ::rustc_target::spec::LinkerFlavor::one_of();
         pub const parse_optimization_fuel: &str = "crate=integer";
@@ -269,8 +268,11 @@ macro_rules! options {
         pub const parse_src_file_hash: &str = "either `md5` or `sha1`";
         pub const parse_relocation_model: &str =
             "one of supported relocation models (`rustc --print relocation-models`)";
+        pub const parse_code_model: &str =
+            "one of supported code models (`rustc --print code-models`)";
         pub const parse_tls_model: &str =
             "one of supported TLS models (`rustc --print tls-models`)";
+        pub const parse_target_feature: &str = parse_string;
     }
 
     #[allow(dead_code)]
@@ -457,24 +459,15 @@ macro_rules! options {
             true
         }
 
-        fn parse_sanitizer(slot: &mut Option<Sanitizer>, v: Option<&str>) -> bool {
-            if let Some(Ok(s)) =  v.map(str::parse) {
-                *slot = Some(s);
-                true
-            } else {
-                false
-            }
-        }
-
-        fn parse_sanitizer_list(slot: &mut Vec<Sanitizer>, v: Option<&str>) -> bool {
+        fn parse_sanitizers(slot: &mut SanitizerSet, v: Option<&str>) -> bool {
             if let Some(v) = v {
-                for s in v.split(',').map(str::parse) {
-                    if let Ok(s) = s {
-                        if !slot.contains(&s) {
-                            slot.push(s);
-                        }
-                    } else {
-                        return false;
+                for s in v.split(',') {
+                    *slot |= match s {
+                        "address" => SanitizerSet::ADDRESS,
+                        "leak" => SanitizerSet::LEAK,
+                        "memory" => SanitizerSet::MEMORY,
+                        "thread" => SanitizerSet::THREAD,
+                        _ => return false,
                     }
                 }
                 true
@@ -503,12 +496,24 @@ macro_rules! options {
         }
 
         fn parse_cfguard(slot: &mut CFGuard, v: Option<&str>) -> bool {
-            match v {
-                Some("disabled") => *slot = CFGuard::Disabled,
-                Some("nochecks") => *slot = CFGuard::NoChecks,
-                Some("checks") => *slot = CFGuard::Checks,
-                _ => return false,
+            if v.is_some() {
+                let mut bool_arg = None;
+                if parse_opt_bool(&mut bool_arg, v) {
+                    *slot = if bool_arg.unwrap() {
+                        CFGuard::Checks
+                    } else {
+                        CFGuard::Disabled
+                    };
+                    return true
+                }
             }
+
+            *slot = match v {
+                None => CFGuard::Checks,
+                Some("checks") => CFGuard::Checks,
+                Some("nochecks") => CFGuard::NoChecks,
+                Some(_) => return false,
+            };
             true
         }
 
@@ -620,6 +625,14 @@ macro_rules! options {
             true
         }
 
+        fn parse_code_model(slot: &mut Option<CodeModel>, v: Option<&str>) -> bool {
+            match v.and_then(|s| CodeModel::from_str(s).ok()) {
+                Some(code_model) => *slot = Some(code_model),
+                _ => return false,
+            }
+            true
+        }
+
         fn parse_tls_model(slot: &mut Option<TlsModel>, v: Option<&str>) -> bool {
             match v.and_then(|s| TlsModel::from_str(s).ok()) {
                 Some(tls_model) => *slot = Some(tls_model),
@@ -647,6 +660,19 @@ macro_rules! options {
             }
             true
         }
+
+        fn parse_target_feature(slot: &mut String, v: Option<&str>) -> bool {
+            match v {
+                Some(s) => {
+                    if !slot.is_empty() {
+                        slot.push_str(",");
+                    }
+                    slot.push_str(s);
+                    true
+                }
+                None => false,
+            }
+        }
     }
 ) }
 
@@ -662,7 +688,7 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
 
     ar: String = (String::new(), parse_string, [UNTRACKED],
         "this option is deprecated and does nothing"),
-    code_model: Option<String> = (None, parse_opt_string, [TRACKED],
+    code_model: Option<CodeModel> = (None, parse_code_model, [TRACKED],
         "choose the code model to use (`rustc --print code-models` for details)"),
     codegen_units: Option<usize> = (None, parse_opt_uint, [UNTRACKED],
         "divide crate into N units to optimize in parallel"),
@@ -742,7 +768,7 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
         "use soft float ABI (*eabihf targets only) (default: no)"),
     target_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
         "select target processor (`rustc --print target-cpus` for details)"),
-    target_feature: String = (String::new(), parse_string, [TRACKED],
+    target_feature: String = (String::new(), parse_target_feature, [TRACKED],
         "target specific attributes. (`rustc --print target-features` for details). \
         This feature is unsafe."),
 
@@ -783,8 +809,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "enable the experimental Chalk-based trait solving engine"),
     codegen_backend: Option<String> = (None, parse_opt_string, [TRACKED],
         "the backend to use"),
-    control_flow_guard: CFGuard = (CFGuard::Disabled, parse_cfguard, [UNTRACKED],
-        "use Windows Control Flow Guard (`disabled`, `nochecks` or `checks`)"),
+    control_flow_guard: CFGuard = (CFGuard::Disabled, parse_cfguard, [TRACKED],
+        "use Windows Control Flow Guard (default: no)"),
     crate_attr: Vec<String> = (Vec::new(), parse_string_push, [TRACKED],
         "inject the given attribute in the crate"),
     debug_macros: bool = (false, parse_bool, [TRACKED],
@@ -853,12 +879,20 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "fix undefined behavior when a thread doesn't eventually make progress \
         (such as entering an empty infinite loop) by inserting llvm.sideeffect \
         (default: no)"),
+    instrument_coverage: bool = (false, parse_bool, [TRACKED],
+        "instrument the generated code with LLVM code region counters to (in the \
+        future) generate coverage reports; disables/overrides some optimization \
+        options (note, the compiler build config must include `profiler = true`) \
+        (default: no)"),
     instrument_mcount: bool = (false, parse_bool, [TRACKED],
         "insert function instrument code for mcount-based tracing (default: no)"),
     keep_hygiene_data: bool = (false, parse_bool, [UNTRACKED],
         "keep hygiene data after analysis (default: no)"),
     link_native_libraries: bool = (true, parse_bool, [UNTRACKED],
         "link native libraries in the linker invocation (default: yes)"),
+    link_self_contained: Option<bool> = (None, parse_opt_bool, [TRACKED],
+        "control whether to link Rust provided C objects/libraries or rely
+         on C toolchain installed in the system"),
     link_only: bool = (false, parse_bool, [TRACKED],
         "link the `.rlink` file generated by `-Z no-link` (default: no)"),
     llvm_time_trace: bool = (false, parse_bool, [UNTRACKED],
@@ -925,13 +959,13 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "print the LLVM optimization passes being run (default: no)"),
     print_mono_items: Option<String> = (None, parse_opt_string, [UNTRACKED],
         "print the result of the monomorphization collection pass"),
-    print_region_graph: bool = (false, parse_bool, [UNTRACKED],
-        "prints region inference graph. \
-        Use with RUST_REGION_GRAPH=help for more info (default: no)"),
     print_type_sizes: bool = (false, parse_bool, [UNTRACKED],
         "print layout information for each type encountered (default: no)"),
     profile: bool = (false, parse_bool, [TRACKED],
         "insert profiling code (default: no)"),
+    profile_emit: Option<PathBuf> = (None, parse_opt_pathbuf, [TRACKED],
+        "file path to emit profiling data at runtime when using 'profile' \
+        (default based on relative source path)"),
     query_dep_graph: bool = (false, parse_bool, [UNTRACKED],
         "enable queries of the dependency graph for regression testing (default: no)"),
     query_stats: bool = (false, parse_bool, [UNTRACKED],
@@ -945,11 +979,11 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
     // soon.
     run_dsymutil: bool = (true, parse_bool, [TRACKED],
         "if on Mac, run `dsymutil` and delete intermediate object files (default: yes)"),
-    sanitizer: Option<Sanitizer> = (None, parse_sanitizer, [TRACKED],
+    sanitizer: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED],
         "use a sanitizer"),
     sanitizer_memory_track_origins: usize = (0, parse_sanitizer_memory_track_origins, [TRACKED],
         "enable origins tracking in MemorySanitizer"),
-    sanitizer_recover: Vec<Sanitizer> = (vec![], parse_sanitizer_list, [TRACKED],
+    sanitizer_recover: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED],
         "enable recovery for selected sanitizers"),
     saturating_float_casts: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "make float->int casts UB-free: numbers outside the integer type's range are clipped to \
@@ -970,6 +1004,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "make the current crate share its generic instantiations"),
     show_span: Option<String> = (None, parse_opt_string, [TRACKED],
         "show spans for compiler debugging (expr|pat|ty)"),
+    span_debug: bool = (false, parse_bool, [UNTRACKED],
+        "forward proc_macro::Span's `Debug` impl to `Span`"),
     // o/w tests have closure@path
     span_free_formats: bool = (false, parse_bool, [UNTRACKED],
         "exclude spans when debug-printing compiler state (default: no)"),
@@ -1022,6 +1058,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "adds unstable command line options to rustc interface (default: no)"),
     use_ctors_section: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "use legacy .ctors section for initializers rather than .init_array"),
+    validate_mir: bool = (false, parse_bool, [UNTRACKED],
+        "validate MIR after each transformation"),
     verbose: bool = (false, parse_bool, [UNTRACKED],
         "in general, enable more debug printouts (default: no)"),
     verify_llvm_ir: bool = (false, parse_bool, [TRACKED],

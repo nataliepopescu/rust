@@ -29,11 +29,11 @@ use rustc_middle::middle::exported_symbols::SymbolExportLevel;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::cgu_reuse_tracker::CguReuseTracker;
 use rustc_session::config::{self, CrateType, Lto, OutputFilenames, OutputType};
-use rustc_session::config::{Passes, Sanitizer, SwitchWithOptPath};
+use rustc_session::config::{Passes, SanitizerSet, SwitchWithOptPath};
 use rustc_session::Session;
-use rustc_span::hygiene::ExpnId;
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::{sym, Symbol};
+use rustc_span::{BytePos, FileName, InnerSpan, Pos, Span};
 use rustc_target::spec::{MergeFunctions, PanicStrategy};
 
 use std::any::Any;
@@ -86,8 +86,8 @@ pub struct ModuleConfig {
     pub pgo_gen: SwitchWithOptPath,
     pub pgo_use: Option<PathBuf>,
 
-    pub sanitizer: Option<Sanitizer>,
-    pub sanitizer_recover: Vec<Sanitizer>,
+    pub sanitizer: SanitizerSet,
+    pub sanitizer_recover: SanitizerSet,
     pub sanitizer_memory_track_origins: usize,
 
     // Flags indicating which outputs to produce.
@@ -110,6 +110,7 @@ pub struct ModuleConfig {
     pub merge_functions: bool,
     pub inline_threshold: Option<usize>,
     pub new_llvm_pass_manager: bool,
+    pub emit_lifetime_markers: bool,
 }
 
 impl ModuleConfig {
@@ -141,8 +142,22 @@ impl ModuleConfig {
         let emit_obj = if !should_emit_obj {
             EmitObj::None
         } else if sess.target.target.options.obj_is_bitcode
-            || sess.opts.cg.linker_plugin_lto.enabled()
+            || (sess.opts.cg.linker_plugin_lto.enabled() && !no_builtins)
         {
+            // This case is selected if the target uses objects as bitcode, or
+            // if linker plugin LTO is enabled. In the linker plugin LTO case
+            // the assumption is that the final link-step will read the bitcode
+            // and convert it to object code. This may be done by either the
+            // native linker or rustc itself.
+            //
+            // Note, however, that the linker-plugin-lto requested here is
+            // explicitly ignored for `#![no_builtins]` crates. These crates are
+            // specifically ignored by rustc's LTO passes and wouldn't work if
+            // loaded into the linker. These crates define symbols that LLVM
+            // lowers intrinsics to, and these symbol dependencies aren't known
+            // until after codegen. As a result any crate marked
+            // `#![no_builtins]` is assumed to not participate in LTO and
+            // instead goes on to generate object code.
             EmitObj::Bitcode
         } else if need_bitcode_in_object(sess) {
             EmitObj::ObjectCode(BitcodeSection::Full)
@@ -160,6 +175,12 @@ impl ModuleConfig {
                     if sess.opts.debugging_opts.profile && !is_compiler_builtins {
                         passes.push("insert-gcov-profiling".to_owned());
                     }
+
+                    // The rustc option `-Zinstrument_coverage` injects intrinsic calls to
+                    // `llvm.instrprof.increment()`, which requires the LLVM `instrprof` pass.
+                    if sess.opts.debugging_opts.instrument_coverage {
+                        passes.push("instrprof".to_owned());
+                    }
                     passes
                 },
                 vec![]
@@ -174,10 +195,10 @@ impl ModuleConfig {
             ),
             pgo_use: if_regular!(sess.opts.cg.profile_use.clone(), None),
 
-            sanitizer: if_regular!(sess.opts.debugging_opts.sanitizer.clone(), None),
+            sanitizer: if_regular!(sess.opts.debugging_opts.sanitizer, SanitizerSet::empty()),
             sanitizer_recover: if_regular!(
-                sess.opts.debugging_opts.sanitizer_recover.clone(),
-                vec![]
+                sess.opts.debugging_opts.sanitizer_recover,
+                SanitizerSet::empty()
             ),
             sanitizer_memory_track_origins: if_regular!(
                 sess.opts.debugging_opts.sanitizer_memory_track_origins,
@@ -244,6 +265,7 @@ impl ModuleConfig {
 
             inline_threshold: sess.opts.cg.inline_threshold,
             new_llvm_pass_manager: sess.opts.debugging_opts.new_llvm_pass_manager,
+            emit_lifetime_markers: sess.emit_lifetime_markers(),
         }
     }
 
@@ -366,7 +388,7 @@ pub struct CompiledModules {
 
 fn need_bitcode_in_object(sess: &Session) -> bool {
     let requested_for_rlib = sess.opts.cg.embed_bitcode
-        && sess.crate_types.borrow().contains(&CrateType::Rlib)
+        && sess.crate_types().contains(&CrateType::Rlib)
         && sess.opts.output_types.contains_key(&OutputType::Exe);
     let forced_by_target = sess.target.target.options.forces_embed_bitcode;
     requested_for_rlib || forced_by_target
@@ -975,7 +997,7 @@ fn start_executing_work<B: ExtraBackendMethods>(
     };
     let cgcx = CodegenContext::<B> {
         backend: backend.clone(),
-        crate_types: sess.crate_types.borrow().clone(),
+        crate_types: sess.crate_types().to_vec(),
         each_linked_rlib_for_lto,
         lto: sess.lto(),
         no_landing_pads: sess.panic_strategy() == PanicStrategy::Abort,
@@ -1535,7 +1557,7 @@ fn spawn_work<B: ExtraBackendMethods>(cgcx: CodegenContext<B>, work: WorkItem<B>
 
 enum SharedEmitterMessage {
     Diagnostic(Diagnostic),
-    InlineAsmError(u32, String),
+    InlineAsmError(u32, String, Level, Option<(String, Vec<InnerSpan>)>),
     AbortIfErrors,
     Fatal(String),
 }
@@ -1556,8 +1578,14 @@ impl SharedEmitter {
         (SharedEmitter { sender }, SharedEmitterMain { receiver })
     }
 
-    pub fn inline_asm_error(&self, cookie: u32, msg: String) {
-        drop(self.sender.send(SharedEmitterMessage::InlineAsmError(cookie, msg)));
+    pub fn inline_asm_error(
+        &self,
+        cookie: u32,
+        msg: String,
+        level: Level,
+        source: Option<(String, Vec<InnerSpan>)>,
+    ) {
+        drop(self.sender.send(SharedEmitterMessage::InlineAsmError(cookie, msg, level, source)));
     }
 
     pub fn fatal(&self, msg: &str) {
@@ -1610,8 +1638,35 @@ impl SharedEmitterMain {
                     }
                     handler.emit_diagnostic(&d);
                 }
-                Ok(SharedEmitterMessage::InlineAsmError(cookie, msg)) => {
-                    sess.span_err(ExpnId::from_u32(cookie).expn_data().call_site, &msg)
+                Ok(SharedEmitterMessage::InlineAsmError(cookie, msg, level, source)) => {
+                    let msg = msg.strip_prefix("error: ").unwrap_or(&msg);
+
+                    let mut err = match level {
+                        Level::Error => sess.struct_err(&msg),
+                        Level::Warning => sess.struct_warn(&msg),
+                        Level::Note => sess.struct_note_without_error(&msg),
+                        _ => bug!("Invalid inline asm diagnostic level"),
+                    };
+
+                    // If the cookie is 0 then we don't have span information.
+                    if cookie != 0 {
+                        let pos = BytePos::from_u32(cookie);
+                        let span = Span::with_root_ctxt(pos, pos);
+                        err.set_span(span);
+                    };
+
+                    // Point to the generated assembly if it is available.
+                    if let Some((buffer, spans)) = source {
+                        let source = sess
+                            .source_map()
+                            .new_source_file(FileName::inline_asm_source_code(&buffer), buffer);
+                        let source_span = Span::with_root_ctxt(source.start_pos, source.end_pos);
+                        let spans: Vec<_> =
+                            spans.iter().map(|sp| source_span.from_inner(*sp)).collect();
+                        err.span_note(spans, "instantiated into assembly here");
+                    }
+
+                    err.emit();
                 }
                 Ok(SharedEmitterMessage::AbortIfErrors) => {
                     sess.abort_if_errors();
@@ -1796,7 +1851,7 @@ fn msvc_imps_needed(tcx: TyCtxt<'_>) -> bool {
     );
 
     tcx.sess.target.target.options.is_like_msvc &&
-        tcx.sess.crate_types.borrow().iter().any(|ct| *ct == CrateType::Rlib) &&
+        tcx.sess.crate_types().iter().any(|ct| *ct == CrateType::Rlib) &&
     // ThinLTO can't handle this workaround in all cases, so we don't
     // emit the `__imp_` symbols. Instead we make them unnecessary by disallowing
     // dynamic linking when linker plugin LTO is enabled.

@@ -9,7 +9,7 @@
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![feature(bool_to_option)]
-#![feature(const_if_match)]
+#![cfg_attr(bootstrap, feature(const_if_match))]
 #![feature(const_fn)]
 #![feature(const_panic)]
 #![feature(nll)]
@@ -25,6 +25,7 @@ extern crate rustc_macros;
 extern crate log;
 
 pub mod abi;
+pub mod asm;
 pub mod spec;
 
 /// Requirements for a `StableHashingContext` to be used in this crate.

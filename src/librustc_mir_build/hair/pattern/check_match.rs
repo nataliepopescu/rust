@@ -3,7 +3,7 @@ use super::_match::WitnessPreference::*;
 use super::_match::{expand_pattern, is_useful, MatchCheckCtxt, Matrix, PatStack};
 use super::{PatCtxt, PatKind, PatternError};
 
-use arena::TypedArena;
+use rustc_arena::TypedArena;
 use rustc_ast::ast::Mutability;
 use rustc_errors::{error_code, struct_span_err, Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
@@ -12,6 +12,7 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
 use rustc_hir::{HirId, Pat};
 use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_session::config::nightly_options;
 use rustc_session::lint::builtin::BINDINGS_WITH_VARIANT_NAME;
 use rustc_session::lint::builtin::{IRREFUTABLE_LET_PATTERNS, UNREACHABLE_PATTERNS};
 use rustc_session::parse::feature_err;
@@ -187,9 +188,9 @@ impl<'tcx> MatchVisitor<'_, 'tcx> {
         let matrix = check_arms(&mut cx, &inlined_arms, source);
 
         // Fifth, check if the match is exhaustive.
-        let scrut_ty = self.tables.node_type(scrut.hir_id);
         // Note: An empty match isn't the same as an empty matrix for diagnostics purposes,
         // since an empty matrix can occur when there are arms, if those arms all have guards.
+        let scrut_ty = self.tables.expr_ty_adjusted(scrut);
         let is_empty_match = inlined_arms.is_empty();
         check_exhaustive(&mut cx, scrut_ty, scrut.span, &matrix, scrut.hir_id, is_empty_match);
     }
@@ -392,8 +393,8 @@ fn check_arms<'p, 'tcx>(
                 }
             }
             Useful(unreachable_subpatterns) => {
-                for pat in unreachable_subpatterns {
-                    unreachable_pattern(cx.tcx, pat.span, id, None);
+                for span in unreachable_subpatterns {
+                    unreachable_pattern(cx.tcx, span, id, None);
                 }
             }
             UsefulWithWitness(_) => bug!(),
@@ -487,9 +488,27 @@ fn check_exhaustive<'p, 'tcx>(
     adt_defined_here(cx, &mut err, scrut_ty, &witnesses);
     err.help(
         "ensure that all possible cases are being handled, \
-         possibly by adding wildcards or more match arms",
+              possibly by adding wildcards or more match arms",
     );
     err.note(&format!("the matched value is of type `{}`", scrut_ty));
+    if (scrut_ty == cx.tcx.types.usize || scrut_ty == cx.tcx.types.isize)
+        && !is_empty_match
+        && witnesses.len() == 1
+        && witnesses[0].is_wildcard()
+    {
+        err.note(&format!(
+            "`{}` does not have a fixed maximum value, \
+                so a wildcard `_` is necessary to match exhaustively",
+            scrut_ty,
+        ));
+        if nightly_options::is_nightly_build() {
+            err.help(&format!(
+                "add `#![feature(precise_pointer_size_matching)]` \
+                    to the crate attributes to enable precise `{}` matching",
+                scrut_ty,
+            ));
+        }
+    }
     err.emit();
 }
 
@@ -579,7 +598,7 @@ fn maybe_point_at_variant(ty: Ty<'_>, patterns: &[super::Pat<'_>]) -> Vec<Span> 
 
 /// Check if a by-value binding is by-value. That is, check if the binding's type is not `Copy`.
 fn is_binding_by_move(cx: &MatchVisitor<'_, '_>, hir_id: HirId, span: Span) -> bool {
-    !cx.tables.node_type(hir_id).is_copy_modulo_regions(cx.tcx, cx.param_env, span)
+    !cx.tables.node_type(hir_id).is_copy_modulo_regions(cx.tcx.at(span), cx.param_env)
 }
 
 /// Check the legality of legality of by-move bindings.

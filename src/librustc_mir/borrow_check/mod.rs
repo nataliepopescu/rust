@@ -4,10 +4,8 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::graph::dominators::Dominators;
 use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, ErrorReported};
 use rustc_hir as hir;
-use rustc_hir::{
-    def_id::{DefId, LocalDefId},
-    HirId, Node,
-};
+use rustc_hir::def_id::LocalDefId;
+use rustc_hir::{HirId, Node};
 use rustc_index::bit_set::BitSet;
 use rustc_index::vec::IndexVec;
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
@@ -17,7 +15,7 @@ use rustc_middle::mir::{
 };
 use rustc_middle::mir::{AggregateKind, BasicBlock, BorrowCheckResult, BorrowKind};
 use rustc_middle::mir::{Field, ProjectionElem, Promoted, Rvalue, Statement, StatementKind};
-use rustc_middle::mir::{Terminator, TerminatorKind};
+use rustc_middle::mir::{InlineAsmOperand, Terminator, TerminatorKind};
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, RegionVid, TyCtxt};
 use rustc_session::lint::builtin::{MUTABLE_BORROW_RESERVATION_CONFLICT, UNUSED_MUT};
@@ -142,7 +140,7 @@ fn do_mir_borrowck<'a, 'tcx>(
         infcx.set_tainted_by_errors();
     }
     let upvars: Vec<_> = tables
-        .upvar_list
+        .closure_captures
         .get(&def_id.to_def_id())
         .into_iter()
         .flat_map(|v| v.values())
@@ -174,7 +172,7 @@ fn do_mir_borrowck<'a, 'tcx>(
     let mut body = input_body.clone();
     let mut promoted = input_promoted.clone();
     let free_regions =
-        nll::replace_regions_in_mir(infcx, def_id.to_def_id(), param_env, &mut body, &mut promoted);
+        nll::replace_regions_in_mir(infcx, def_id, param_env, &mut body, &mut promoted);
     let body = &body; // no further changes
 
     let location_table = &LocationTable::new(&body);
@@ -218,6 +216,7 @@ fn do_mir_borrowck<'a, 'tcx>(
         &mut flow_inits,
         &mdpe.move_data,
         &borrow_set,
+        &upvars,
     );
 
     // Dump MIR results into a file, if that is enabled. This let us
@@ -275,10 +274,11 @@ fn do_mir_borrowck<'a, 'tcx>(
             let mut promoted_mbcx = MirBorrowckCtxt {
                 infcx,
                 body: promoted_body,
-                mir_def_id: def_id.to_def_id(),
+                mir_def_id: def_id,
                 move_data: &move_data,
                 location_table: &LocationTable::new(promoted_body),
                 movable_generator,
+                fn_self_span_reported: Default::default(),
                 locals_are_invalidated_at_exit,
                 access_place_error_reported: Default::default(),
                 reservation_error_reported: Default::default(),
@@ -307,11 +307,12 @@ fn do_mir_borrowck<'a, 'tcx>(
     let mut mbcx = MirBorrowckCtxt {
         infcx,
         body,
-        mir_def_id: def_id.to_def_id(),
+        mir_def_id: def_id,
         move_data: &mdpe.move_data,
         location_table,
         movable_generator,
         locals_are_invalidated_at_exit,
+        fn_self_span_reported: Default::default(),
         access_place_error_reported: Default::default(),
         reservation_error_reported: Default::default(),
         reservation_warnings: Default::default(),
@@ -459,7 +460,7 @@ fn do_mir_borrowck<'a, 'tcx>(
 crate struct MirBorrowckCtxt<'cx, 'tcx> {
     crate infcx: &'cx InferCtxt<'cx, 'tcx>,
     body: &'cx Body<'tcx>,
-    mir_def_id: DefId,
+    mir_def_id: LocalDefId,
     move_data: &'cx MoveData<'tcx>,
 
     /// Map from MIR `Location` to `LocationIndex`; created
@@ -488,6 +489,10 @@ crate struct MirBorrowckCtxt<'cx, 'tcx> {
     // but it is currently inconvenient to track down the `BorrowIndex`
     // at the time we detect and report a reservation error.
     reservation_error_reported: FxHashSet<Place<'tcx>>,
+    /// This fields keeps track of the `Span`s that we have
+    /// used to report extra information for `FnSelfUse`, to avoid
+    /// unnecessarily verbose errors.
+    fn_self_span_reported: FxHashSet<Span>,
     /// Migration warnings to be reported for #56254. We delay reporting these
     /// so that we can suppress the warning if there's a corresponding error
     /// for the activation of the borrow.
@@ -658,7 +663,7 @@ impl<'cx, 'tcx> dataflow::ResultsVisitor<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tc
             TerminatorKind::SwitchInt { ref discr, switch_ty: _, values: _, targets: _ } => {
                 self.consume_operand(loc, (discr, span), flow_state);
             }
-            TerminatorKind::Drop { location: ref drop_place, target: _, unwind: _ } => {
+            TerminatorKind::Drop { place: ref drop_place, target: _, unwind: _ } => {
                 let tcx = self.infcx.tcx;
 
                 // Compute the type with accurate region information.
@@ -687,7 +692,7 @@ impl<'cx, 'tcx> dataflow::ResultsVisitor<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tc
                 );
             }
             TerminatorKind::DropAndReplace {
-                location: drop_place,
+                place: drop_place,
                 value: ref new_value,
                 target: _,
                 unwind: _,
@@ -701,6 +706,7 @@ impl<'cx, 'tcx> dataflow::ResultsVisitor<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tc
                 ref destination,
                 cleanup: _,
                 from_hir_call: _,
+                fn_span: _,
             } => {
                 self.consume_operand(loc, (func, span), flow_state);
                 for arg in args {
@@ -724,13 +730,55 @@ impl<'cx, 'tcx> dataflow::ResultsVisitor<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tc
                 self.mutate_place(loc, (resume_arg, span), Deep, JustWrite, flow_state);
             }
 
+            TerminatorKind::InlineAsm {
+                template: _,
+                ref operands,
+                options: _,
+                line_spans: _,
+                destination: _,
+            } => {
+                for op in operands {
+                    match *op {
+                        InlineAsmOperand::In { reg: _, ref value }
+                        | InlineAsmOperand::Const { ref value } => {
+                            self.consume_operand(loc, (value, span), flow_state);
+                        }
+                        InlineAsmOperand::Out { reg: _, late: _, place, .. } => {
+                            if let Some(place) = place {
+                                self.mutate_place(
+                                    loc,
+                                    (place, span),
+                                    Shallow(None),
+                                    JustWrite,
+                                    flow_state,
+                                );
+                            }
+                        }
+                        InlineAsmOperand::InOut { reg: _, late: _, ref in_value, out_place } => {
+                            self.consume_operand(loc, (in_value, span), flow_state);
+                            if let Some(out_place) = out_place {
+                                self.mutate_place(
+                                    loc,
+                                    (out_place, span),
+                                    Shallow(None),
+                                    JustWrite,
+                                    flow_state,
+                                );
+                            }
+                        }
+                        InlineAsmOperand::SymFn { value: _ }
+                        | InlineAsmOperand::SymStatic { def_id: _ } => {}
+                    }
+                }
+            }
+
             TerminatorKind::Goto { target: _ }
             | TerminatorKind::Abort
             | TerminatorKind::Unreachable
             | TerminatorKind::Resume
             | TerminatorKind::Return
             | TerminatorKind::GeneratorDrop
-            | TerminatorKind::FalseEdges { real_target: _, imaginary_target: _ }
+            | TerminatorKind::FalseEdge { real_target: _, imaginary_target: _ }
             | TerminatorKind::FalseUnwind { real_target: _, unwind: _ } => {
                 // no data used, thus irrelevant to borrowck
             }
@@ -774,11 +822,12 @@ impl<'cx, 'tcx> dataflow::ResultsVisitor<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tc
             | TerminatorKind::Call { .. }
             | TerminatorKind::Drop { .. }
             | TerminatorKind::DropAndReplace { .. }
-            | TerminatorKind::FalseEdges { real_target: _, imaginary_target: _ }
+            | TerminatorKind::FalseEdge { real_target: _, imaginary_target: _ }
             | TerminatorKind::FalseUnwind { real_target: _, unwind: _ }
             | TerminatorKind::Goto { .. }
             | TerminatorKind::SwitchInt { .. }
-            | TerminatorKind::Unreachable => {}
+            | TerminatorKind::Unreachable
+            | TerminatorKind::InlineAsm { .. } => {}
         }
     }
 }
@@ -1254,6 +1303,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     flow_state,
                 );
             }
+
+            Rvalue::ThreadLocalRef(_) => {}
 
             Rvalue::Use(ref operand)
             | Rvalue::Repeat(ref operand, _)
@@ -2264,30 +2315,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     /// be `self` in the current MIR, because that is the only time we directly access the fields
     /// of a closure type.
     pub fn is_upvar_field_projection(&self, place_ref: PlaceRef<'tcx>) -> Option<Field> {
-        let mut place_projection = place_ref.projection;
-        let mut by_ref = false;
-
-        if let [proj_base @ .., ProjectionElem::Deref] = place_projection {
-            place_projection = proj_base;
-            by_ref = true;
-        }
-
-        match place_projection {
-            [base @ .., ProjectionElem::Field(field, _ty)] => {
-                let tcx = self.infcx.tcx;
-                let base_ty = Place::ty_from(place_ref.local, base, self.body(), tcx).ty;
-
-                if (base_ty.is_closure() || base_ty.is_generator())
-                    && (!by_ref || self.upvars[field.index()].by_ref)
-                {
-                    Some(*field)
-                } else {
-                    None
-                }
-            }
-
-            _ => None,
-        }
+        path_utils::is_upvar_field_projection(self.infcx.tcx, &self.upvars, place_ref, self.body())
     }
 }
 
