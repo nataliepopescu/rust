@@ -5,7 +5,7 @@ use crate::build::ForGuard::{OutsideGuard, RefWithinGuard};
 use crate::build::{BlockAnd, BlockAndExtension, Builder};
 use crate::hair::*;
 use rustc_middle::middle::region;
-//use rustc_middle::mir::AssertKind::BoundsCheck;
+use rustc_middle::mir::AssertKind::BoundsCheck;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, Ty, TyCtxt, Variance};
 use rustc_span::Span;
@@ -305,13 +305,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // The "retagging" transformation (for Stacked Borrows) relies on this.
         let idx = unpack!(block = self.as_temp(block, temp_lifetime, index, Mutability::Not,));
 
-        /*block = self.bounds_check(
+        block = self.bounds_check(
             block,
             base_place.clone().into_place(self.hir.tcx()),
             idx,
             expr_span,
             source_info,
-        );*/
+        );
 
         if is_outermost_index {
             self.read_fake_borrows(block, fake_borrow_temps, source_info)
@@ -328,7 +328,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         block.and(base_place.index(idx))
     }
 
-    /*fn bounds_check(
+    fn bounds_check(
         &mut self,
         block: BasicBlock,
         slice: Place<'tcx>,
@@ -354,7 +354,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let msg = BoundsCheck { len: Operand::Move(len), index: Operand::Copy(Place::from(index)) };
         // assert!(lt, "...")
         self.assert(block, Operand::Move(lt), true, msg, expr_span)
-    }*/
+    }
 
     fn add_fake_borrows_of_base(
         &mut self,
