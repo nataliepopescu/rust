@@ -111,6 +111,8 @@ pub struct ModuleConfig {
     pub inline_threshold: Option<usize>,
     pub new_llvm_pass_manager: bool,
     pub emit_lifetime_markers: bool,
+
+    pub remove_bc: bool,
 }
 
 impl ModuleConfig {
@@ -224,6 +226,8 @@ impl ModuleConfig {
             ),
             emit_obj,
             bc_cmdline: sess.target.target.options.bitcode_llvm_cmdline.clone(),
+
+            remove_bc: sess.opts.debugging_opts.remove_bc,
 
             verify_llvm_ir: sess.verify_llvm_ir(),
             no_prepopulate_passes: sess.opts.cg.no_prepopulate_passes,

@@ -1986,6 +1986,7 @@ extern "C" {
         PrepareForThinLTO: bool,
         PGOGenPath: *const c_char,
         PGOUsePath: *const c_char,
+        RemoveBC: bool,
     );
     pub fn LLVMRustAddLibraryInfo(
         PM: &PassManager<'a>,

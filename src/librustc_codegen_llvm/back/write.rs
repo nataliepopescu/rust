@@ -939,6 +939,7 @@ pub unsafe fn with_llvm_pmb(
         prepare_for_thin_lto,
         pgo_gen_path.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         pgo_use_path.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        config.remove_bc,
     );
 
     llvm::LLVMPassManagerBuilderSetSizeLevel(builder, opt_size as u32);

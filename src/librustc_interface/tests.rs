@@ -568,6 +568,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(profile, true);
     tracked!(profile_emit, Some(PathBuf::from("abc")));
     tracked!(relro_level, Some(RelroLevel::Full));
+    tracked!(remove_bc, true);
     tracked!(report_delayed_bugs, true);
     tracked!(run_dsymutil, false);
     tracked!(sanitizer, SanitizerSet::ADDRESS);

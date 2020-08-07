@@ -522,12 +522,13 @@ extern "C" void LLVMRustDisposeTargetMachine(LLVMTargetMachineRef TM) {
 extern "C" void LLVMRustConfigurePassManagerBuilder(
     LLVMPassManagerBuilderRef PMBR, LLVMRustCodeGenOptLevel OptLevel,
     bool MergeFunctions, bool SLPVectorize, bool LoopVectorize, bool PrepareForThinLTO,
-    const char* PGOGenPath, const char* PGOUsePath) {
+    const char* PGOGenPath, const char* PGOUsePath, bool RemoveBC) {
   unwrap(PMBR)->MergeFunctions = MergeFunctions;
   unwrap(PMBR)->SLPVectorize = SLPVectorize;
   unwrap(PMBR)->OptLevel = fromRust(OptLevel);
   unwrap(PMBR)->LoopVectorize = LoopVectorize;
   unwrap(PMBR)->PrepareForThinLTO = PrepareForThinLTO;
+  unwrap(PMBR)->RemoveBC = RemoveBC;
 
   if (PGOGenPath) {
     assert(!PGOUsePath);

@@ -789,7 +789,7 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
     // - src/librustc_interface/tests.rs
 
     allow_features: Option<Vec<String>> = (None, parse_opt_comma_list, [TRACKED],
-        "only allow the listed language features to be enabled in code (space separated)"),
+        "only allow the listed language features ///AM I INSERTED/// to be enabled in code (space separated)"),
     always_encode_mir: bool = (false, parse_bool, [TRACKED],
         "encode MIR of all functions into the crate metadata (default: no)"),
     asm_comments: bool = (false, parse_bool, [TRACKED],
@@ -972,6 +972,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "print some statistics about the query system (default: no)"),
     relro_level: Option<RelroLevel> = (None, parse_relro_level, [TRACKED],
         "choose which RELRO level to use"),
+    remove_bc: bool = (false, parse_bool, [TRACKED],
+        "removes bounds checks in IR before any other passes run (default: no)"),
     report_delayed_bugs: bool = (false, parse_bool, [TRACKED],
         "immediately print bugs registered with `delay_span_bug` (default: no)"),
     // The default historical behavior was to always run dsymutil, so we're
