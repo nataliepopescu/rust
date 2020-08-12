@@ -11,7 +11,7 @@ use crate::llvm_util;
 use crate::type_::Type;
 use crate::LlvmCodegenBackend;
 use crate::ModuleLlvm;
-use log::debug;
+use log::{debug, info};
 use rustc_codegen_ssa::back::write::{BitcodeSection, CodegenContext, EmitObj, ModuleConfig};
 use rustc_codegen_ssa::traits::*;
 use rustc_codegen_ssa::{CompiledModule, ModuleCodegen};
@@ -489,6 +489,13 @@ pub(crate) unsafe fn optimize(
         // some common passes.
         let fpm = llvm::LLVMCreateFunctionPassManagerForModule(llmod);
         let mpm = llvm::LLVMCreatePassManager();
+
+        if config.enable_remarks{
+            let filename = SmallCStr::new("remarks.out");
+            if !llvm::LLVMRustSetupOptimizationRemarks(llcx, filename.as_ptr()) {
+                info!("Setup remarks failed");
+            }
+        }
 
         {
             let find_pass = |pass_name: &str| {

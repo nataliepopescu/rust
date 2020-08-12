@@ -2153,6 +2153,7 @@ extern "C" {
     ) -> bool;
     pub fn LLVMRustPrepareThinLTOResolveWeak(Data: &ThinLTOData, Module: &Module) -> bool;
     pub fn LLVMRustPrepareThinLTOInternalize(Data: &ThinLTOData, Module: &Module) -> bool;
+    pub fn LLVMRustSetupOptimizationRemarks(Context: &Context, Filename: *const c_char) -> bool;
     pub fn LLVMRustPrepareThinLTOImport(
         Data: &ThinLTOData,
         Module: &Module,

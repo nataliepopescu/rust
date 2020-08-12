@@ -113,6 +113,7 @@ pub struct ModuleConfig {
     pub emit_lifetime_markers: bool,
 
     pub remove_bc: bool,
+    pub enable_remarks: bool,
 }
 
 impl ModuleConfig {
@@ -228,6 +229,7 @@ impl ModuleConfig {
             bc_cmdline: sess.target.target.options.bitcode_llvm_cmdline.clone(),
 
             remove_bc: sess.opts.debugging_opts.remove_bc,
+            enable_remarks: sess.opts.debugging_opts.enable_remarks,
 
             verify_llvm_ir: sess.verify_llvm_ir(),
             no_prepopulate_passes: sess.opts.cg.no_prepopulate_passes,

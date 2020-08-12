@@ -22,6 +22,7 @@
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Host.h"
+#include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
@@ -1430,6 +1431,28 @@ LLVMRustPrepareThinLTOInternalize(const LLVMRustThinLTOData *Data, LLVMModuleRef
   Module &Mod = *unwrap(M);
   const auto &DefinedGlobals = Data->ModuleToDefinedGVSummaries.lookup(Mod.getModuleIdentifier());
   thinLTOInternalizeModule(Mod, DefinedGlobals);
+  return true;
+}
+
+// extern "C"
+
+extern "C" bool
+LLVMRustSetupOptimizationRemarks(LLVMContextRef C, const char* filename) {
+  StringRef RemarksFilename(filename);
+  StringRef RemarksPasses("");
+  StringRef RemarksFormat("yaml");
+  bool RemarksWithHotness = true;
+  unsigned RemarksHotnessThreshold = 0;
+  Expected<std::unique_ptr<ToolOutputFile>> RemarksFileOrErr =
+      setupOptimizationRemarks(*unwrap(C), RemarksFilename, RemarksPasses,
+                               RemarksFormat, RemarksWithHotness,
+                               RemarksHotnessThreshold);
+  if (Error E = RemarksFileOrErr.takeError()) {
+    return false;
+  }
+ static  std::unique_ptr<ToolOutputFile> RemarksFile = std::move(*RemarksFileOrErr);
+  RemarksFile->keep();
+
   return true;
 }
 

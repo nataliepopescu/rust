@@ -849,6 +849,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "in addition to `.mir` files, create graphviz `.dot` files (default: no)"),
     emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
         "emit a section containing stack size metadata (default: no)"),
+    enable_remarks: bool = (false, parse_bool, [TRACKED],
+        "enable remarks of LLVM opts (default: no)"),
     fewer_names: bool = (false, parse_bool, [TRACKED],
         "reduce memory use by retaining fewer names within compilation artifacts (LLVM-IR) \
         (default: no)"),
