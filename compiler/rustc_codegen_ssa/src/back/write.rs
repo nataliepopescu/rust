@@ -112,6 +112,8 @@ pub struct ModuleConfig {
     pub inline_threshold: Option<u32>,
     pub new_llvm_pass_manager: Option<bool>,
     pub emit_lifetime_markers: bool,
+
+    pub convert_unchecked_indexing: bool,
 }
 
 impl ModuleConfig {
@@ -257,6 +259,8 @@ impl ModuleConfig {
             inline_threshold: sess.opts.cg.inline_threshold,
             new_llvm_pass_manager: sess.opts.debugging_opts.new_llvm_pass_manager,
             emit_lifetime_markers: sess.emit_lifetime_markers(),
+
+            convert_unchecked_indexing: sess.opts.debugging_opts.convert_unchecked_indexing,
         }
     }
 

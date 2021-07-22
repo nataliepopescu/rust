@@ -699,6 +699,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(binary_dep_depinfo, true);
     tracked!(chalk, true);
     tracked!(codegen_backend, Some("abc".to_string()));
+    tracked!(convert_unchecked_indexing, true);
     tracked!(crate_attr, vec!["abc".to_string()]);
     tracked!(debug_macros, true);
     tracked!(dep_info_omit_d_target, true);

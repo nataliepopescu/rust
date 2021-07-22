@@ -24,6 +24,7 @@ pub mod cleanup_post_borrowck;
 pub mod const_debuginfo;
 pub mod const_goto;
 pub mod const_prop;
+pub mod convert_unchecked_indexing;
 pub mod coverage;
 pub mod deaggregator;
 pub mod deduplicate_blocks;
@@ -266,21 +267,43 @@ fn mir_const<'tcx>(
 
     let mut body = tcx.mir_built(def).steal();
 
+    let no_cui: &[&dyn MirPass<'tcx>] = &[
+        // MIR-level lints.
+        &check_packed_ref::CheckPackedRef,
+        &check_const_item_mutation::CheckConstItemMutation,
+        &function_item_references::FunctionItemReferences,
+        // What we need to do constant evaluation.
+        &simplify::SimplifyCfg::new("initial"),
+        &rustc_peek::SanityCheck,
+    ];
+
+    let yes_cui: &[&dyn MirPass<'tcx>] = &[
+        // MIR-level lints.
+        &check_packed_ref::CheckPackedRef,
+        &check_const_item_mutation::CheckConstItemMutation,
+        &function_item_references::FunctionItemReferences,
+        // What we need to do constant evaluation.
+        &simplify::SimplifyCfg::new("initial"),
+        &rustc_peek::SanityCheck,
+        // CUI
+        &convert_unchecked_indexing::ConvertUncheckedIndexing,
+        &simplify::SimplifyCfg::new("post-cui"),
+        &rustc_peek::SanityCheck,
+    ];
+
     util::dump_mir(tcx, None, "mir_map", &0, &body, |_, _| Ok(()));
 
     run_passes(
         tcx,
         &mut body,
         MirPhase::Const,
-        &[&[
-            // MIR-level lints.
-            &check_packed_ref::CheckPackedRef,
-            &check_const_item_mutation::CheckConstItemMutation,
-            &function_item_references::FunctionItemReferences,
-            // What we need to do constant evaluation.
-            &simplify::SimplifyCfg::new("initial"),
-            &rustc_peek::SanityCheck,
-        ]],
+        &[
+            if tcx.sess.opts.debugging_opts.convert_unchecked_indexing { 
+                yes_cui
+            } else {
+                no_cui
+            }
+        ],
     );
     tcx.alloc_steal_mir(body)
 }

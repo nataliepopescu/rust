@@ -1025,6 +1025,8 @@ options! {
         "the backend to use"),
     combine_cgu: bool = (false, parse_bool, [TRACKED],
         "combine CGUs into a single one"),
+    convert_unchecked_indexing: bool = (false, parse_bool, [TRACKED],
+        "converts all unchecked indexing in current crate to checked indexing"),
     crate_attr: Vec<String> = (Vec::new(), parse_string_push, [TRACKED],
         "inject the given attribute in the crate"),
     debug_macros: bool = (false, parse_bool, [TRACKED],
