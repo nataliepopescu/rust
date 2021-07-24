@@ -278,16 +278,14 @@ fn mir_const<'tcx>(
     ];
 
     let yes_cui: &[&dyn MirPass<'tcx>] = &[
+        // CUI
+        &convert_unchecked_indexing::ConvertUncheckedIndexing,
         // MIR-level lints.
         &check_packed_ref::CheckPackedRef,
         &check_const_item_mutation::CheckConstItemMutation,
         &function_item_references::FunctionItemReferences,
         // What we need to do constant evaluation.
         &simplify::SimplifyCfg::new("initial"),
-        &rustc_peek::SanityCheck,
-        // CUI
-        &convert_unchecked_indexing::ConvertUncheckedIndexing,
-        &simplify::SimplifyCfg::new("post-cui"),
         &rustc_peek::SanityCheck,
     ];
 
