@@ -6,8 +6,8 @@ use rustc_middle::mir::*;
 use rustc_middle::ty::{TyCtxt, FnDef};
 use rustc_index::vec::Idx;
 use rustc_hir::def_id::{DefId, DefIndex};
-//use rustc_middle::ty::subst::GenericArg;
-//use rustc_middle::ty::List;
+use rustc_middle::ty::subst::GenericArg;
+use rustc_middle::ty::List;
 
 pub struct ConvertUncheckedIndexing;
 
@@ -17,7 +17,15 @@ impl<'tcx> MirPass<'tcx> for ConvertUncheckedIndexing {
     }
 }
 
-pub fn convert_unchecked_indexing<'tcx>(mut tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+#[derive(Debug)]
+struct UnwrapSubsts<'tcx> {
+    immut_u8: &'tcx List<GenericArg<'tcx>>,
+    mut_u8: &'tcx List<GenericArg<'tcx>>,
+    immut_u32: &'tcx List<GenericArg<'tcx>>,
+    mut_u32: &'tcx List<GenericArg<'tcx>>,
+}
+
+pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     // Store new blocks generated; one new block for every 'get_unchecked[_mut]' call
     //let mut new_blocks = Vec::new();
     //let mut new_locals = Vec::new();
@@ -25,23 +33,13 @@ pub fn convert_unchecked_indexing<'tcx>(mut tcx: TyCtxt<'tcx>, body: &mut Body<'
     println!();
     println!("RESTARTING");
     println!();
-    // rustc_middle/src/ty/context.rs::964 .. pub struct GlobalCtxt<'tcx> { ..
-    //   pub arena: &'tcx WorkerLocal<Arena<'tcx>>,
-    //   pub sess
-    //   pub consts (pre-interned?) 'CommonConsts'
-    //   pub types                  'CommonTypes' => i.e. u32
-    //              new(..) {
-    //                  CommonTypes {
-    //                      ..
-    //                      // [decl: pub u8: Ty<'tcx>,]
-    //                      u8: mk(Uint(ty::UintTy::U8)),
-    //                      ..
-    //                  }
-    //              }
-    //   pub(crate) alloc_map
-    println!("tcx.debug_stats(): {:?}", tcx.debug_stats());
 
-    let mut us = &mut tcx.unwrap_substs;
+    let mut us = &mut UnwrapSubsts {
+        immut_u8: List::empty(),
+        mut_u8: List::empty(),
+        immut_u32: List::empty(),
+        mut_u32: List::empty(),
+    };
     println!("unwrap_substs struct??: {:?}", us);
 
     let (blocks, locals) = body.basic_blocks_and_local_decls_mut();
@@ -138,6 +136,11 @@ pub fn convert_unchecked_indexing<'tcx>(mut tcx: TyCtxt<'tcx>, body: &mut Body<'
                                 println!("getting immut_u32: {:?}", us.immut_u32);
                                 println!();
                             }
+                        }
+
+                        if unwrap_substs.len() == 0 {
+                            println!("empty unwrap_substs");
+                            continue;
                         }
 
                         let new_get_def_id = DefId {

@@ -71,7 +71,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter;
 use std::mem;
-use std::ops::{Bound, Deref, DerefMut};
+use std::ops::{Bound, Deref};
 use std::sync::Arc;
 
 /// A type that is not publicly constructable. This prevents people from making [`TyKind::Error`]s
@@ -961,13 +961,6 @@ impl<'tcx> Deref for TyCtxt<'tcx> {
     }
 }
 
-impl DerefMut for TyCtxt<'_> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.gcx
-    }
-}
-
 pub struct GlobalCtxt<'tcx> {
     pub arena: &'tcx WorkerLocal<Arena<'tcx>>,
 
@@ -1063,16 +1056,6 @@ pub struct GlobalCtxt<'tcx> {
 
     pub(super) vtables_cache:
         Lock<FxHashMap<(Ty<'tcx>, Option<ty::PolyExistentialTraitRef<'tcx>>), AllocId>>,
-
-    pub unwrap_substs: UnwrapSubsts<'tcx>,
-}
-
-#[derive(Debug)]
-pub struct UnwrapSubsts<'tcx> {
-    pub immut_u8: &'tcx List<GenericArg<'tcx>>,
-    pub mut_u8: &'tcx List<GenericArg<'tcx>>,
-    pub immut_u32: &'tcx List<GenericArg<'tcx>>,
-    pub mut_u32: &'tcx List<GenericArg<'tcx>>,
 }
 
 impl<'tcx> TyCtxt<'tcx> {
@@ -1231,12 +1214,6 @@ impl<'tcx> TyCtxt<'tcx> {
             output_filenames: Arc::new(output_filenames),
             main_def: resolutions.main_def,
             vtables_cache: Default::default(),
-            unwrap_substs: UnwrapSubsts {
-                immut_u8: List::empty(),
-                mut_u8: List::empty(),
-                immut_u32: List::empty(),
-                mut_u32: List::empty(),
-            },
         }
     }
 
