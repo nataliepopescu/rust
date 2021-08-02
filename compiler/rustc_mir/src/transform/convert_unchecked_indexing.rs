@@ -38,7 +38,7 @@ impl<'tcx> UnwrapSubsts<'tcx> {
 pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     // Store new blocks generated; one new block for every 'get_unchecked[_mut]' call
     let mut new_blocks = Vec::new();
-    //let new_locals = Vec::new();
+    let new_locals = Vec::new();
 
     println!();
     println!("RESTARTING");
@@ -152,11 +152,11 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                         //    None => continue,
                         //    Some(it) => it,
                         //};
-                        locals_len += 1;
-                        let local_idx = locals_len; // + new_locals.len();
+                        //locals_len += 1;
+                        let local_idx = locals_len + new_locals.len();
                         let tmp_place : Place<'tcx> = Place::from(Local::from_usize(local_idx));
                         // FIXME how to push new locals
-                        //new_locals.push(LocalDecl::new(fn_sig.output(), constant.span));
+                        new_locals.push(LocalDecl::new(tmp_place.local, constant.span));
 
                         // generate new basic block (for unwrap call)
                         let unwrap_place = place.clone();
@@ -237,6 +237,6 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
         }
     }
 
-    //body.local_decls.extend(new_locals);
+    body.local_decls.extend(new_locals);
     blocks.extend(new_blocks);
 }
