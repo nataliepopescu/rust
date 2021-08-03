@@ -8,6 +8,7 @@ use rustc_index::vec::Idx;
 use rustc_hir::def_id::{DefId, DefIndex};
 use rustc_middle::ty::subst::GenericArg;
 use rustc_middle::ty::List;
+use rustc_middle::ty::Instance;
 //use rustc_middle::ty::subst::Subst;
 
 pub struct ConvertUncheckedIndexing;
@@ -38,17 +39,17 @@ impl<'tcx> UnwrapSubsts<'tcx> {
 pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     // Store new blocks generated; one new block for every 'get_unchecked[_mut]' call
     let mut new_blocks = Vec::new();
-    let new_locals = Vec::new();
+    let mut new_locals = Vec::new();
 
     println!();
     println!("RESTARTING");
     println!();
 
     let mut us = &mut UnwrapSubsts::new();
-
+    let body_source_def_id = body.source.def_id();
     let (blocks, locals) = body.basic_blocks_and_local_decls_mut();
     let blocks_len = blocks.len();
-    let mut locals_len = locals.len();
+    let locals_len = locals.len();
 
     for block in blocks.indices() {
         match blocks[block].terminator {
@@ -56,22 +57,10 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                 kind: 
                     TerminatorKind::Call {
                         // func: Operand<'tcx>
-                        //   example: core::slice::<impl [u32]>::get_unchecked::<usize>
                         ref mut func, 
-                        // ConstantKind::Ty(&'tcx ty::Const<'tcx>)
-                        // ConstantKind::Ty(ty::Const::?)
-                        //   Const { Ty, ConstKind }
-                        //: Operand::Constant(box Constant {
-                            //literal,
-                            //span,
-                            //user_ty,
-                        //}),
                         // args: Vec<Operand<'tcx>>
-                        //   example: move _3
                         ref args,
                         // destination: Option<(Place<'tcx>, BasicBlock)>
-                        //   example place: _15
-                        //   example dest_bb: bb8
                         destination: Some((ref mut place, ref mut dest_bb)),
                         ref cleanup,
                         ref from_hir_call,
@@ -79,24 +68,17 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                     },
                 ref source_info
             }) => {
-                // FnDef(DefId, SubstsRef<'tcx>)
-                // pub type SubstsRef<'tcx> = &'tcx InternalSubsts<'tcx>;
-                // pub type InternalSubsts<'tcx> = List<GenericArg<'tcx>>;
-                // pub struct GenericArg { ptr: NonZeroUsize, marker: PhantomData<(...)> }
                 if let Some(constant) = func.constant() {
                     if let FnDef(old_get_def_id, get_substs) = constant.literal.ty().kind() {
                         let func_string = constant.literal.to_string();
                         println!("func_string: {:?}", func_string);
                         println!("get_substs: {:?}", get_substs);
 
-                        // eventually make switch statement
                         if func_string.starts_with("Option::") && func_string.ends_with("::unwrap") {
                             if func_string.contains("&mut u8") {
                                     us.mut_u8 = *get_substs;
-                                    println!("setting mut_u8: {:?}", us.mut_u8);
                             } else if func_string.contains("&u8") {
                                     us.immut_u8 = *get_substs;
-                                    println!("setting immut_u8: {:?}", us.immut_u8);
                             }
                         }
 
@@ -104,28 +86,22 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                             continue;
                         }
 
-                        println!();
-
                         let get_index;
                         let mut unwrap_substs = us.mut_u8;
                         if func_string.contains("get_unchecked_mut") {
                             get_index = DefIndex::from_u32(10740); // get_mut
                             if func_string.contains("u8") {
                                 unwrap_substs = us.mut_u8;
-                                println!("getting mut_u8: {:?}", us.mut_u8);
-                                println!();
                             }
                         } else {
                             get_index = DefIndex::from_u32(10738); // get
                             if func_string.contains("u8") {
                                 unwrap_substs = us.immut_u8;
-                                println!("getting immut_u8: {:?}", us.immut_u8);
-                                println!();
                             }
                         }
 
                         if unwrap_substs.len() == 0 {
-                            println!("empty unwrap_substs");
+                            println!("empty unwrap_substs, continuing...");
                             continue;
                         }
 
@@ -133,41 +109,54 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                             krate: old_get_def_id.krate,
                             index: get_index,
                         };
-                        let new_unwrap_def_id = DefId {
-                            krate: old_get_def_id.krate,
-                            index: DefIndex::from_u32(7770),
-                        };
 
-                        println!("unwrap_substs: {:?}", unwrap_substs);
-                        let unwrap_func = Operand::function_handle(tcx, new_unwrap_def_id, unwrap_substs, constant.span);
-
-                        println!("old_get_def_id: {:?}", old_get_def_id);
-                        println!("new_get_def_id: {:?}", new_get_def_id);
-                        println!("unwrap_func: {:?}", unwrap_func);
+                        let unwrap_func = Operand::function_handle(
+                            tcx, 
+                            DefId {
+                                krate: old_get_def_id.krate,
+                                index: DefIndex::from_u32(7770),
+                            },
+                            unwrap_substs, 
+                            constant.span
+                        );
 
                         // generate temp local
-                        //let callee = Instance::resolve(tcx, ?self.param_env?, old_get_def_id, get_substs);
-                        //let fn_sig = tcx.fn_sig(new_get_def_id).subst(tcx, get_substs);
-                        //let callsite = match self.resolve_callsite(caller_body, bb, bb_data) {
-                        //    None => continue,
-                        //    Some(it) => it,
-                        //};
-                        //locals_len += 1;
                         let local_idx = locals_len + new_locals.len();
                         let tmp_place : Place<'tcx> = Place::from(Local::from_usize(local_idx));
-                        // FIXME how to push new locals
-                        new_locals.push(LocalDecl::new(tmp_place.local, constant.span));
+                        let param_env = tcx.param_env_reveal_all_normalized(body_source_def_id);
+                        let callee = match Instance::resolve(tcx, param_env, new_get_def_id, get_substs) {
+                            Ok(it) => match it {
+                                Some(c) => c, 
+                                None => {
+                                    println!("no instance?");
+                                    continue;
+                                },
+                            },
+                            Err(e) => {
+                                println!("error resolving instance: {:?}", e);
+                                continue;
+                            }
+                        };
+                        let callee_body = tcx.instance_mir(callee.def);
+                        let callee_body = callee.subst_mir_and_normalize_erasing_regions(
+                            tcx, 
+                            param_env, 
+                            callee_body.clone()
+                        );
+                        new_locals.push(LocalDecl::new(callee_body.return_ty(), source_info.span));
 
                         // generate new basic block (for unwrap call)
                         let unwrap_place = place.clone();
                         let unwrap_dest_bb = dest_bb.clone();
-
                         let arg0 = args[0].place().unwrap().local;
                         let arg1 = args[1].place().unwrap().local;
 
-                        println!("arg to unwrap: {:?}", tmp_place);
-                        println!("destination of unwrap: {:?}", unwrap_dest_bb);
-                        println!("lval place of unwrap: {:?}", unwrap_place);
+                        println!("NEW BLOCK");
+                        println!("unwrap_func: {:?}", unwrap_func);
+                        println!("arg: {:?}", tmp_place);
+                        println!("place: {:?}", unwrap_place);
+                        println!("dest_bb: {:?}", unwrap_dest_bb);
+                        println!();
 
                         let unwrap_block = BasicBlockData {
                             statements: vec![
@@ -198,22 +187,26 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                         new_blocks.push(unwrap_block);
                         let new_bb = &BasicBlock::new(bb_idx);
 
-                        println!("args to new call: {:?}, {:?}", arg0, arg1);
-                        println!("destination of new call: {:?}", new_bb);
-                        println!("lval place of new call: {:?}", tmp_place);
-
-                        println!("BEFORE");
-                        println!("func: {:?}", func);
+                        println!("CUR BLOCK: BEFORE");
+                        println!("get_func: {:?}", func);
+                        println!("args: {:?}", args);
                         println!("place: {:?}", place);
                         println!("dest_bb: {:?}", dest_bb);
+                        println!();
 
                         // replace unchecked terminator with checked terminator
-                        *func = Operand::function_handle(tcx, new_get_def_id, get_substs, constant.span);
+                        *func = Operand::function_handle(
+                            tcx, 
+                            new_get_def_id,
+                            get_substs, 
+                            constant.span
+                        );
                         *place = tmp_place;
                         *dest_bb = *new_bb;
 
-                        println!("AFTER");
-                        println!("func: {:?}", func);
+                        println!("CUR BLOCK: AFTER");
+                        println!("get_func: {:?}", func);
+                        println!("args: {:?}", args);
                         println!("place: {:?}", place);
                         println!("dest_bb: {:?}", dest_bb);
                         println!();
@@ -224,12 +217,16 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
                             source_info: source_info_clone,
                             kind: StatementKind::StorageDead(tmp_place.local),
                         });
+
                         // push StorageLive for new tmp_place in this block
                         blocks[block].statements.push(Statement {
                             source_info: source_info_clone,
                             kind: StatementKind::StorageLive(tmp_place.local),
                         });
 
+                        println!("inserted StorageDead({:?}) in {:?} bb", tmp_place.local, unwrap_dest_bb);
+                        println!("pushed StorageLive({:?}) in current {:?} bb", tmp_place.local, block);
+                        println!();
                     }
                 }
             },
@@ -237,6 +234,6 @@ pub fn convert_unchecked_indexing<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>
         }
     }
 
-    body.local_decls.extend(new_locals);
+    locals.extend(new_locals);
     blocks.extend(new_blocks);
 }
