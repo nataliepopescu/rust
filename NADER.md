@@ -59,3 +59,13 @@ stdout and stderr to files like so:
 ```sh
 RUSTFLAGS="-Z convert-unchecked-indexing -Z dump-mir=perf_mot" cargo bench > out 2> err
 ```
+
+At the bottom of the stdout you should see the benchmark results: 
+
+```sh
+running 2 tests
+test perf_mot_bench     ... bench:     747,854 ns/iter (+/- 18,181)
+test unknown_size_bench ... bench:     747,636 ns/iter (+/- 17,663)
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 2 measured
+```
