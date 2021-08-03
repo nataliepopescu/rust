@@ -69,3 +69,16 @@ test unknown_size_bench ... bench:     747,636 ns/iter (+/- 17,663)
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 2 measured
 ```
+
+Compare to results without our custom pass: 
+
+```sh
+$ RUSTFLAGS="-Z dump-mir=perf_mot" cargo bench
+
+... 
+running 2 tests
+test perf_mot_bench     ... bench:      40,156 ns/iter (+/- 203)
+test unknown_size_bench ... bench:     748,356 ns/iter (+/- 1,154)
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 2 measured
+```
