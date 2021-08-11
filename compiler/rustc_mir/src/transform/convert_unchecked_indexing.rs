@@ -53,6 +53,12 @@ pub fn convert_unchecked_indexing<'tcx>(_tcx: TyCtxt<'tcx>, body: &mut Body<'tcx
     //let (blocks, locals) = body.basic_blocks_and_local_decls_mut();
     //let blocks_len = blocks.len();
     //let locals_len = locals.len();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .create(true)
+        .open("mir-filelist")
+        .unwrap();
 
     for block in blocks.indices() {
         match blocks[block].terminator {
@@ -85,11 +91,7 @@ pub fn convert_unchecked_indexing<'tcx>(_tcx: TyCtxt<'tcx>, body: &mut Body<'tcx
                     if !func_string.starts_with("core::") || args.len() != 2 || !func_string.contains("get_unchecked") {
                         continue;
                     }
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .append(true)
-                        .open("mir-filelist")
-                        .unwrap();
+
                     if let Err(e) = writeln!(file, "{:?}", source_info.span) {
                         eprintln!("Couldn't write to file: {}", e);
                     }
