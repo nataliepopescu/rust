@@ -12,6 +12,8 @@ use rustc_middle::ty::TyCtxt;
 //use rustc_middle::ty::Instance;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 //use rustc_middle::ty::subst::Subst;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
 
 pub struct ConvertUncheckedIndexing;
 
@@ -83,10 +85,18 @@ pub fn convert_unchecked_indexing<'tcx>(_tcx: TyCtxt<'tcx>, body: &mut Body<'tcx
                     if !func_string.starts_with("core::") || args.len() != 2 || !func_string.contains("get_unchecked") {
                         continue;
                     }
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .append(true)
+                        .open("mir-filelist")
+                        .unwrap();
+                    if let Err(e) = writeln!(file, "{:?}", source_info.span) {
+                        eprintln!("Couldn't write to file: {}", e);
+                    }
                         
                     //println!("func_string: {:?}", func_string);
                     //println!("fn_span: {:?}", fn_span);
-                    println!("{:?}", source_info.span);
+                    //println!("{:?}", source_info.span);
                     //println!("source_info.scope: {:?}", source_info.scope);
 
                         //let get_index;
