@@ -57,7 +57,7 @@ pub fn convert_unchecked_indexing<'tcx>(_tcx: TyCtxt<'tcx>, body: &mut Body<'tcx
         .write(true)
         .append(true)
         .create(true)
-        .open("mir-filelist")
+        .open("/mir-filelist")
         .unwrap();
 
     for block in blocks.indices() {
