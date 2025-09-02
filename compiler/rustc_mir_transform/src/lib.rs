@@ -165,6 +165,7 @@ declare_passes! {
     mod remove_uninit_drops : RemoveUninitDrops;
     mod remove_unneeded_drops : RemoveUnneededDrops;
     mod remove_zsts : RemoveZsts;
+    mod replace_dynamic_dispatch : ReplaceDynamicDispatch;
     mod required_consts : RequiredConstsVisitor;
     mod post_analysis_normalize : PostAnalysisNormalize;
     mod sanity_check : SanityCheck;
@@ -673,6 +674,9 @@ pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'
             // Has to be done before inlining, otherwise actual call will be almost always inlined.
             // Also simple, so can just do first.
             &lower_slice_len::LowerSliceLenCalls,
+            // Want the rewrite to benefit from downstream inlining, so 
+            // placing here for now.
+            &replace_dynamic_dispatch::ReplaceDynamicDispatch,
             // Perform instsimplify before inline to eliminate some trivial calls (like clone
             // shims).
             &instsimplify::InstSimplify::BeforeInline,
