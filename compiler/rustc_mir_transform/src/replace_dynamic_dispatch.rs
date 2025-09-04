@@ -63,50 +63,18 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                                 match region.kind() {
                                     RegionKind::ReErased => debug!("RegionKind: ReErased"),
                                     _ => debug!("RegionKind: another"),
-                                    //RegionKind::ReEarlyParam(..) => debug!("RegionKind: ReEarlyParam"),
-                                    //RegionKind::ReBound(..) => debug!("RegionKind: ReBound"),
-                                    //RegionKind::ReLateParam(..) => debug!("RegionKind: ReLateParam"),
-                                    //RegionKind::ReStatic => debug!("RegionKind: ReStatic"),
-                                    //RegionKind::ReVar(..) => debug!("RegionKind: ReVar"),
-                                    //RegionKind::RePlaceholder(..) => debug!("RegionKind: RePlaceHolder"),
-                                    //RegionKind::ReError(..) => debug!("RegionKind: ReError"),
                                 }
                                 match borrowkind {
                                     BorrowKind::Shared => debug!("BorrowKind: Shared"),
                                     _ => debug!("BorrowKind: another"),
-                                    //BorrowKind::Fake(_) => debug!("BorrowKind: Fake"),
-                                    //BorrowKind::Mut { kind: _ } => debug!("BorrowKind: Mut"),
                                 }
                             },
                             _ => debug!("RValue Kind: another"),
-                            //Rvalue::Repeat(..) => debug!("RValue Kind: Repeat"),
-                            //Rvalue::ThreadLocalRef(..) => debug!("RValue Kind: ThreadLocalRef"),
-                            //Rvalue::RawPtr(..) => debug!("RValue Kind: RawPtr"),
-                            //Rvalue::Len(..) => debug!("RValue Kind: Len"),
-                            //Rvalue::Cast(..) => debug!("RValue Kind: Cast"),
-                            //Rvalue::NullaryOp(..) => debug!("RValue Kind: NullaryOp"),
-                            //Rvalue::UnaryOp(..) => debug!("RValue Kind: UnaryOp"),
-                            //Rvalue::Discriminant(..) => debug!("RValue Kind: Discriminant"),
-                            //Rvalue::Aggregate(..) => debug!("RValue Kind: Aggregate"),
-                            //Rvalue::ShallowInitBox(..) => debug!("RValue Kind: ShallowInitBox"),
-                            //Rvalue::CopyForDeref(..) => debug!("RValue Kind: CopyForDeref"),
-                            //Rvalue::WrapUnsafeBinder(..) => debug!("RValue Kind: WrapUnsafeBinder"),
                         }
                     }
                     StatementKind::StorageLive(..) => debug!("Kind: StorageLive"),
                     StatementKind::StorageDead(..) => debug!("Kind: StorageDead"),
                     _ => debug!("Kind: another"),
-                    //StatementKind::FakeRead(..) => debug!("Kind: FakeRead"),
-                    //StatementKind::SetDiscriminant { place: _, variant_index: _ } => debug!("Kind: SetDiscriminant"),
-                    //StatementKind::Deinit(..) => debug!("Kind: Deinit"),
-                    //StatementKind::Retag(..) => debug!("Kind: Retag"),
-                    //StatementKind::PlaceMention(..) => debug!("Kind: PlaceMention"),
-                    //StatementKind::AscribeUserType(..) => debug!("Kind: AscribeUserType"),
-                    //StatementKind::Coverage(..) => debug!("Kind: Coverage"),
-                    //StatementKind::Intrinsic(..) => debug!("Kind: Intrinsic"),
-                    //StatementKind::ConstEvalCounter => debug!("Kind: ConstEvalCounter"),
-                    //StatementKind::Nop => debug!("Kind: Nop"),
-                    //StatementKind::BackwardIncompatibleDropHint { place: _, reason: _ } => debug!("Kind: BackwardIncompatibleDropHint"),
                 }
                 debug!("{:?}", statement);
             }
@@ -120,7 +88,7 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                     ..
                 } => {
                     debug!("\nCALL func: {:?}", operand);
-                    for (i, arg) in op_args.into_iter().enumerate() { //if op_args.len() > 1 {
+                    for (i, arg) in op_args.into_iter().enumerate() {
                         if i != 0 {
                             continue;
                         }
