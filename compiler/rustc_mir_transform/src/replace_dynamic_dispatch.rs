@@ -22,9 +22,8 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
         let binding = body.clone();
         let local_decls = binding.local_decls();
 
-        debug!("\nBEGINNING\n");
         for block in body.basic_blocks_mut() {
-            debug!("\nNEW BLOCK\n");
+            debug!("\nNEW BLOCK\n\n\n");
             for statement in &block.statements {
                 debug!("\nSTMT\n");
                 match &statement.kind {
@@ -69,6 +68,20 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                                     _ => debug!("BorrowKind: another"),
                                 }
                             },
+                            Rvalue::Cast(castkind, op, ty) => {
+                                debug!("RValue Kind: Cast");
+                                match castkind {
+                                    CastKind::PtrToPtr => debug!("CastKind: PtrToPtr"),
+                                    CastKind::Transmute => debug!("CastKind: Transmute"),
+                                    _ => debug!("CastKind: another"),
+                                }
+                                match op {
+                                    Operand::Copy(_) => debug!("Copy"),
+                                    Operand::Move(_) => debug!("Move"),
+                                    Operand::Constant(_) => debug!("Constant"),
+                                }
+                                debug!("Ty: {:?}", ty);
+                            },
                             _ => debug!("RValue Kind: another"),
                         }
                     }
@@ -85,9 +98,20 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                 TerminatorKind::Call {
                     func: operand,
                     args: op_args,
-                    ..
+                    destination: dst,
+                    target: bb_opt,
+                    unwind: unwind_act,
+                    call_source: callsource,
+                    fn_span: span,
                 } => {
-                    debug!("\nCALL func: {:?}", operand);
+                    debug!("TerminatorKind: Call");
+                    debug!("Operand: {:?}", operand);
+                    debug!("Args: {:?}", op_args);
+                    debug!("Destination: {:?}", dst);
+                    debug!("Target: {:?}", bb_opt);
+                    debug!("Unwind: {:?}", unwind_act);
+                    debug!("CallSource: {:?}", callsource);
+                    debug!("FnSpan: {:?}", span);
                     for (i, arg) in op_args.into_iter().enumerate() {
                         if i != 0 {
                             continue;
@@ -95,25 +119,41 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                         match &arg.node {
                             Operand::Move(place) 
                             | Operand::Copy(place) => {
+                                debug!("ArgOp: Move/Copy");
                                 let place_ty = place.ty(local_decls, tcx);
-                                debug!("arg type: {:?}", place_ty);
+                                //debug!("arg type: {:?}", place_ty);
                                 let deref = place_ty.ty.builtin_deref(false);
                                 if deref.is_some() && deref.unwrap().is_trait() {
-                                    debug!("REPLACE");
+                                    debug!("-----REPLACE\n\n\n\n\n\n\n");
                                 }
                             },
-                            Operand::Constant(_) => {},
+                            Operand::Constant(_) => debug!("ArgOp: Const"),
                         }
                     }
                 },
-                TerminatorKind::TailCall {
-                    func: operand,
-                    ..
+                TerminatorKind::SwitchInt {
+                    discr: op,
+                    targets: switchtargets, 
                 } => {
-                    // skipping for now
-                    debug!("\nTAILCALL func: {:?}", operand);
+                    debug!("TerminatorKind: SwitchInt");
+                    debug!("Discr: {:?}", op);
+                    debug!("SwitchTargets-values: {:?}", switchtargets.all_values());
+                    debug!("SwitchTargets-targets: {:?}", switchtargets.all_targets());
                 },
-                _ => debug!("\nanother terminator"),
+                _ => debug!("TerminatorKind: another"),
+                //TerminatorKind::TailCall { .. } => debug!("TerminatorKind: TailCall"),
+                //TerminatorKind::Goto { .. } => debug!("TerminatorKind: Goto"),
+                //TerminatorKind::UnwindResume => debug!("TerminatorKind: UnwindResume"),
+                //TerminatorKind::UnwindTerminate(_) => debug!("TerminatorKind: UnwindTerminate"),
+                //TerminatorKind::Return => debug!("TerminatorKind: Return"),
+                //TerminatorKind::Unreachable => debug!("TerminatorKind: Unreachable"),
+                //TerminatorKind::Drop { .. } => debug!("TerminatorKind: Drop"),
+                //TerminatorKind::Assert { .. } => debug!("TerminatorKind: Assert"),
+                //TerminatorKind::Yield { .. } => debug!("TerminatorKind: Yield"),
+                //TerminatorKind::CoroutineDrop => debug!("TerminatorKind: CoroutineDrop"),
+                //TerminatorKind::FalseEdge { .. } => debug!("TerminatorKind: FalseEdge"),
+                //TerminatorKind::FalseUnwind { .. } => debug!("TerminatorKind: FalseUnwind"),
+                //TerminatorKind::InlineAsm { .. } => debug!("TerminatorKind: InlineAsm"),
             }
         }
     }
