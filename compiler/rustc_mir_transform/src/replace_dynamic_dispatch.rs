@@ -1,10 +1,24 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 //! This pass replaces dynamically dispatched function calls with a switch statement of equivalent 
 //! statically dispatched function calls. 
 
 use tracing::debug;
 
 use rustc_middle::mir::*;
-use rustc_middle::ty::{RegionKind, TyCtxt};
+use rustc_middle::ty::*; //{AdtDef, AdtDefData, Ty, TyCtxt}; //RegionKind
+
+use rustc_span::*;
+//use rustc_span::symbol::*;
+use rustc_span::def_id::*;
+use rustc_abi::*;
+use rustc_hir::Safety;
+use rustc_index::IndexVec;
+use rustc_hashes::Hash64;
+//use rustc_data_structures::intern::Interned;
+
+use crate::patch::MirPatch;
 
 pub(super) struct ReplaceDynamicDispatch;
 
@@ -14,32 +28,64 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        //debug!("ReplaceDynamicDispatch");
-        //debug!("MIR Phase: {:?}", body.phase);
-        //debug!("body source: {:?}", body.source);
+        let mut patch = MirPatch::new(body);
 
         // FIXME is there a better way to do this?? (sans clone)
         //let binding = body.clone();
         //let local_decls = binding.local_decls();
+        for (idx, local_decl) in body.local_decls().iter_enumerated() {
+            debug!("-------idx: {:?}", idx);
+            debug!("local_decl: {:?}", local_decl);
+            debug!("mutability: {:?}", local_decl.mutability);
+            debug!("ty: {:?}", local_decl.ty);
+            debug!("-TyKind:");
+            id_ty(local_decl.ty);
+            /*
+            match local_decl.ty.kind() {
+                crate::ty::Bool => debug!("Bool"),
+                crate::ty::RawPtr(ty, m) => {
+                    debug!("RawPtr");
+                    debug!("mut: {:?}", m);
+                    debug!("inner ty: {:?}", ty);
+                    match ty.kind() {
+                        crate::ty::Dynamic(..) => debug!("Dynamic"),
+                        _ => {},
+                    }
+                },
+                crate::ty::Ref(reg, ty, m) => {
+                    debug!("Ref");
+                    debug!("reg: {:?}", reg);
+                    debug!("ty: {:?}", ty);
+                    debug!("mut: {:?}", m);
+                },
+                crate::ty::UnsafeBinder(..) => debug!("UnsafeBinder"),
+                crate::ty::Dynamic(..) => debug!("Dynamic"),
+                crate::ty::FnDef(..) => debug!("FnDef"),
+                crate::ty::FnPtr(..) => debug!("FnPtr"),
+                crate::ty::Adt(..) => debug!("Adt"),
+                crate::ty::Foreign(_) => debug!("Foreign"),
+                crate::ty::Pat(..) => debug!("Pat"),
+                _ => debug!("another"),
+            }
+            */
+        }
 
-        /*
-        for block in body.basic_blocks_mut() {
-            match &block.terminator().kind {
-                TerminatorKind::Call {
-                    func, 
-                    args, 
-                    destination,
-                    target,
-                    unwind, 
-                    ..,
-                } => {
-
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            match &data.terminator().kind {
+                TerminatorKind::Call { func, .. } => {
+                    if let Some((defid, rawlist)) = func.const_fn_def() {
+                        if tcx.def_path_debug_str(defid).contains("Animal::speak") {
+                            if rawlist.type_at(0).is_trait() {
+                                replace_dynamic_dispatch(tcx, body, &mut patch, bb);
+                            }
+                        }
+                    }
                 }
                 _ => {},
             }
         }
-        */
 
+        /*
         for block in body.basic_blocks_mut() {
             debug!("\n\n\n\nNEW BLOCK\n");
             for statement in &block.statements {
@@ -244,9 +290,274 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                 _ => debug!("another"),
             }
         }
+        */
     }
 
     fn is_required(&self) -> bool {
         true
     }
 }
+
+fn replace_dynamic_dispatch<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    _body: &Body<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    _bb: BasicBlock,
+) {
+    debug!("-----REPLACE");
+
+    // /////////////////////////
+    // replace current call with:
+    // - &raw const
+    // - ptr_metadata call
+    //
+    // [og place] = [rw place]
+    // _24 = _51
+    // _22 = _23
+    //
+    // new locals: _22 and _21
+    // - let mut _22: *const dyn Animal;
+    // - scope 5 { let _21: std::ptr::DynMetadata<dyn Animal>; ... }
+    add_pm_locals(tcx, patch);
+
+    // maintain target/unwind bb links
+    // - old target: bb14 - drop dog (_20)
+    // - new target: bb28 (how to ref non-brittle-y?)
+    // - old unwind: bb22 - cleanup drop dog (_20)
+    // - new unwind: bb33 (how to ref non-brittle-y?)
+    // /////////////////////////
+
+
+
+
+
+
+
+    // /////////////////////////
+    // add block (cat ptr_metadata):
+    // - copy std::ptr::Unique<dyn Animal>.0: std::ptr::NonNull<dyn Animal>) as *const dyn Animal (Transmute);
+    // - &*
+    // - &raw const
+    // - ptr_metadata call
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (dog ptr_metadata) - same as above
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (animal into_raw):
+    // - const false (?)
+    // - move
+    // - into_raw
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (first compare):
+    // - (PtrToPtr)
+    // - ref
+    // - ref
+    // - Eq
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (first switch):
+    // - switchInt
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (cat speak):
+    // - copy
+    // - Transmute
+    // - &*
+    // - &*
+    // - speak
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (cat goto) ?
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (second compare) - like first compare
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (second switch) - like first switch
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (dog speak) - like cat speak
+    // /////////////////////////
+
+    // /////////////////////////
+    // add block (dog goto) ? - like cat goto
+    // /////////////////////////
+
+    // /////////////////////////
+    // make sure cleanup funnels to the same place
+    // /////////////////////////
+}
+
+fn add_pm_locals<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+) {
+    let pm_did = DefId { index: DefIndex::from_u32(2453), krate: CrateNum::new(2) };
+    let pm_variant_field0 = FieldDef {
+        did: DefId { index: DefIndex::from_u32(2455), krate: CrateNum::new(2) },
+        name: Symbol::new(4918),
+        vis: Visibility::Restricted(LocalDefId { local_def_index: DefIndex::from_u32(2430) }.into()),
+        safety: Safety::Safe,
+        value: None,
+    };
+    let pm_variant_field1 = FieldDef {
+        did: DefId { index: DefIndex::from_u32(2456), krate: CrateNum::new(2) },
+        name: Symbol::new(4919),
+        vis: Visibility::Restricted(LocalDefId { local_def_index: DefIndex::from_u32(2430) }.into()),
+        safety: Safety::Safe,
+        value: None,
+    };
+    let mut pm_variant_fields = IndexVec::new();
+    let _ = pm_variant_fields.push(pm_variant_field0);
+    let _ = pm_variant_fields.push(pm_variant_field1);
+    let pm_variant = VariantDef::new(
+        Symbol::new(2850),
+        Some(pm_did),
+        None,
+        VariantDiscr::Relative(0),
+        pm_variant_fields,
+        pm_did,
+        None,
+        false,
+    );
+    let mut pm_variants = IndexVec::new();
+    let _ = pm_variants.push(pm_variant);
+    let pm_adt_def = tcx.mk_adt_def(
+        pm_did,
+        AdtKind::Struct,
+        pm_variants,
+        ReprOptions {
+            int: None,
+            align: None,
+            pack: None,
+            flags: ReprFlags::empty(),
+            field_shuffle_seed: Hash64::new(11036929796519478320),
+        }
+    );
+    // ty: Dynamic(RawList([(), Binder<( , )>], ReErased, DynKind::Dyn)
+    let trait_obj_tykind = Dynamic(
+        tcx.mk_type_list(&[Binder::dummy(ExistentialPredicate::Trait(
+            ExistentialTraitRef::new(
+                tcx,
+                DefId { index: DefIndex::from_u32(3), krate: CrateNum::new(0) },
+                []
+            )
+        ))]),
+        Region::new_from_kind(tcx, RegionKind::ReErased),
+        DynKind::Dyn,
+    );
+    let trait_obj_ty = tcx.mk_ty_from_kind(trait_obj_tykind);
+    let gen_args_ref = tcx.mk_args(&[GenericArg::from(trait_obj_ty)]);
+    patch.new_local_with_info(
+        // ty
+        Ty::new_adt(
+            tcx,
+            pm_adt_def,
+            gen_args_ref,
+        ),
+        // dummy span
+        Span::new(BytePos(0), BytePos(0), SyntaxContext::root(), None),
+        // dummy local_info 
+        LocalInfo::Boring,
+    );
+}
+
+// Identification helpers
+
+fn id_ty<'tcx>(ty: Ty<'tcx>) {
+    match ty.kind() {
+        crate::ty::Bool => debug!("Bool"),
+        crate::ty::RawPtr(ty, m) => {
+            debug!("RawPtr");
+            debug!("mut: {:?}", m);
+            debug!("inner ty: {:?}", ty);
+            id_ty(*ty);
+        },
+        crate::ty::Ref(reg, ty, m) => {
+            debug!("Ref");
+            debug!("reg: {:?}", reg);
+            debug!("ty: {:?}", ty);
+            debug!("mut: {:?}", m);
+        },
+        crate::ty::UnsafeBinder(..) => debug!("UnsafeBinder"),
+        crate::ty::Dynamic(rawlist, region, dynkind) => {
+            debug!("Dynamic");
+            debug!("region: {:?}", region.kind());
+            debug!("dynkind: {:?}", dynkind);
+            for (i, binder) in rawlist.iter().enumerate() {
+                debug!("--idx: {:?}", i);
+                if let Some(ty) = binder.no_bound_vars() {
+                    match ty {
+                        ExistentialPredicate::Trait(etr) => {
+                            debug!("Trait");
+                            debug!("etr.def_id: {:?}", etr.def_id);
+                            debug!("etr.args: {:?}", etr.args);
+                            debug!("did index?: {:?}", etr.def_id.index);
+                            debug!("did krate?: {:?}", etr.def_id.krate);
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        },
+        crate::ty::FnDef(..) => debug!("FnDef"),
+        crate::ty::FnPtr(..) => debug!("FnPtr"),
+        crate::ty::Adt(def, rawlist) => {
+            debug!("Adt");
+            debug!("def: {:?}", def);
+            debug!("rawlist: {:?}", rawlist);
+            debug!("genargs...");
+            for (gidx, genarg) in rawlist.iter().enumerate() {
+                debug!("--GENARGSidx: {:?}", gidx);
+                let type_opt = genarg.as_type();
+                debug!("kind: {:?}", genarg.kind());
+                debug!("as_region: {:?}", genarg.as_region());
+                debug!("as_type: {:?}", type_opt);
+                debug!("as_const: {:?}", genarg.as_const());
+                if type_opt.is_some() {
+                    id_ty(type_opt.unwrap());
+                }
+            }
+            let did = def.did();
+            debug!("did.index: {:?}", did.index);
+            debug!("did.krate: {:?}", did.krate);
+            debug!("def.kind(): {:?}", def.adt_kind());
+            debug!("def.repr(): {:?}", def.repr());
+            id_adt_variants(*def);
+        },
+        crate::ty::Foreign(_) => debug!("Foreign"),
+        crate::ty::Pat(..) => debug!("Pat"),
+        _ => debug!("another"),
+    }
+}
+
+fn id_adt_variants<'tcx>(def: AdtDef<'tcx>) {
+    debug!("variants...");
+    for (vidx, variant) in def.variants().into_iter().enumerate() {
+        debug!("--VARIANTidx: {:?}", vidx);
+        debug!("variant: {:?}", variant);
+        debug!("name: {:?}", variant.name.as_u32());
+        for (fidx, field) in variant.fields.iter().enumerate() {
+            debug!("---FIELDidx: {:?}", fidx);
+            debug!("field: {:?}", field);
+            debug!("name: {:?}", field.name.as_u32());
+            debug!("visibility: {:?}", field.vis);
+            match field.vis {
+                Visibility::Restricted(id) => debug!("restricted id: {:?}", id),
+                _ => {},
+            }
+        }
+    }
+}
+
