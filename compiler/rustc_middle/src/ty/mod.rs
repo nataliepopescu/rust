@@ -1320,32 +1320,6 @@ impl PartialEq for VariantDef {
                 && self.discr == other.discr
                 && self.fields == other.fields
                 && self.flags == other.flags;
-            debug!("VariantDef");
-            debug!("self.ctor: {:?}", self.ctor);
-            debug!("self.name: {:?}", self.name);
-            debug!("self.discr: {:?}", self.discr);
-            debug!("self.fields: {:?}", self.fields);
-            debug!("self.flags: {:?}", self.flags);
-            debug!("other.ctor: {:?}", other.ctor);
-            debug!("other.name: {:?}", other.name);
-            debug!("other.discr: {:?}", other.discr);
-            debug!("other.fields: {:?}", other.fields);
-            debug!("other.flags: {:?}", other.flags);
-            if self.ctor != other.ctor {
-                debug!("DIFFER - ctor");
-            }
-            if self.name != other.name {
-                debug!("DIFFER - name");
-            }
-            if self.discr != other.discr {
-                debug!("DIFFER - discr");
-            }
-            if self.fields != other.fields {
-                debug!("DIFFER - fields");
-            }
-            if self.flags != other.flags {
-                debug!("DIFFER - flags");
-            }
             assert!(deep, "VariantDef for the same def-id has differing data");
         }
 
@@ -1412,22 +1386,6 @@ impl PartialEq for FieldDef {
         if cfg!(debug_assertions) && res {
             let deep =
                 self.name == other.name && self.vis == other.vis && self.safety == other.safety;
-            debug!("FieldDef");
-            debug!("self.name: {:?}", self.name);
-            debug!("self.vis: {:?}", self.vis);
-            debug!("self.safety: {:?}", self.safety);
-            debug!("other.name: {:?}", other.name);
-            debug!("other.vis: {:?}", other.vis);
-            debug!("other.safety: {:?}", other.safety);
-            if self.name != other.name {
-                debug!("DIFFER - name");
-            }
-            if self.vis != other.vis {
-                debug!("DIFFER - vis");
-            }
-            if self.safety != other.safety {
-                debug!("DIFFER - safety");
-            }
             assert!(deep, "FieldDef for the same def-id has differing data");
         }
 
