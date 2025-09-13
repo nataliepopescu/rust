@@ -1,3 +1,5 @@
+#![allow(rustc::direct_use_of_rustc_type_ir)]
+
 //! Module that collects the things that have no stability guarantees.
 //!
 //! We want to keep rustc_public's IR definitions and logic separate from
@@ -14,6 +16,7 @@ use rustc_public_bridge::context::CompilerCtxt;
 
 use super::compiler_interface::BridgeTys;
 use crate::{CtorKind, ItemKind};
+use rustc_type_ir::{Binder, ExistentialPredicate};
 
 pub(crate) mod convert;
 mod internal_cx;
@@ -40,6 +43,8 @@ pub trait InternalCx<'tcx>: Copy + Clone {
     ) -> &'tcx List<ty::PolyExistentialPredicate<'tcx>>;
 
     fn mk_type_list(self, v: &[Ty<'tcx>]) -> &'tcx List<Ty<'tcx>>;
+
+    fn mk_binder_list(self, v: &[Binder<TyCtxt<'tcx>, ExistentialPredicate<TyCtxt<'tcx>>>]) -> &'tcx List<Binder<TyCtxt<'tcx>, ExistentialPredicate<TyCtxt<'tcx>>>>;
 
     fn lifetimes_re_erased(self) -> ty::Region<'tcx>;
 

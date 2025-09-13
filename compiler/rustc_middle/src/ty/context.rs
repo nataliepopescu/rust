@@ -78,7 +78,7 @@ use crate::traits::solve::{
 };
 use crate::ty::predicate::ExistentialPredicateStableCmpExt as _;
 use crate::ty::{
-    self, AdtDef, AdtDefData, AdtKind, Binder, Clause, Clauses, Const, GenericArg, GenericArgs,
+    self, AdtDef, AdtDefData, AdtKind, Binder, Clause, Clauses, Const, ExistentialPredicate, GenericArg, GenericArgs,
     GenericArgsRef, GenericParamDefKind, List, ListWithCachedTypeInfo, ParamConst, ParamTy,
     Pattern, PatternKind, PolyExistentialPredicate, PolyFnSig, Predicate, PredicateKind,
     PredicatePolarity, Region, RegionKind, ReprOptions, TraitObjectVisitor, Ty, TyKind, TyVid,
@@ -856,6 +856,7 @@ pub struct CtxtInterners<'tcx> {
     const_lists: InternedSet<'tcx, List<ty::Const<'tcx>>>,
     args: InternedSet<'tcx, GenericArgs<'tcx>>,
     type_lists: InternedSet<'tcx, List<Ty<'tcx>>>,
+    binder_lists: InternedSet<'tcx, List<Binder<'tcx, ExistentialPredicate<'tcx>>>>,
     canonical_var_kinds: InternedSet<'tcx, List<CanonicalVarKind<'tcx>>>,
     region: InternedSet<'tcx, RegionKind<'tcx>>,
     poly_existential_predicates: InternedSet<'tcx, List<PolyExistentialPredicate<'tcx>>>,
@@ -894,6 +895,7 @@ impl<'tcx> CtxtInterners<'tcx> {
             const_lists: InternedSet::with_capacity(N * 4),
             args: InternedSet::with_capacity(N * 4),
             type_lists: InternedSet::with_capacity(N * 4),
+            binder_lists: InternedSet::with_capacity(N * 4),
             region: InternedSet::with_capacity(N * 4),
             poly_existential_predicates: InternedSet::with_capacity(N / 4),
             canonical_var_kinds: InternedSet::with_capacity(N / 2),
@@ -2420,6 +2422,7 @@ nop_lift! { layout; Layout<'a> => Layout<'tcx> }
 nop_lift! { valtree; ValTree<'a> => ValTree<'tcx> }
 
 nop_list_lift! { type_lists; Ty<'a> => Ty<'tcx> }
+//nop_list_lift! { binder_lists; Binder<'a, ExistentialPredicate<'a>> => Binder<'tcx, ExistentialPredicate<'tcx>> }
 nop_list_lift! {
     poly_existential_predicates; PolyExistentialPredicate<'a> => PolyExistentialPredicate<'tcx>
 }
@@ -2708,6 +2711,7 @@ slice_interners!(
     const_lists: pub mk_const_list(Const<'tcx>),
     args: pub mk_args(GenericArg<'tcx>),
     type_lists: pub mk_type_list(Ty<'tcx>),
+    binder_lists: pub mk_binder_list(Binder<'tcx, ExistentialPredicate<'tcx>>),
     canonical_var_kinds: pub mk_canonical_var_kinds(CanonicalVarKind<'tcx>),
     poly_existential_predicates: intern_poly_existential_predicates(PolyExistentialPredicate<'tcx>),
     projs: pub mk_projs(ProjectionKind),

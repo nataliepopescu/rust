@@ -1,8 +1,12 @@
+#![allow(rustc::direct_use_of_rustc_type_ir)]
+
 //! Implementation of InternalCx.
 
 pub(crate) use helpers::*;
 use rustc_middle::ty::{List, Ty, TyCtxt};
 use rustc_middle::{mir, ty};
+
+use rustc_type_ir::{Binder, ExistentialPredicate};
 
 use super::InternalCx;
 
@@ -69,6 +73,10 @@ impl<'tcx> InternalCx<'tcx> for TyCtxt<'tcx> {
 
     fn mk_type_list(self, v: &[Ty<'tcx>]) -> &'tcx List<Ty<'tcx>> {
         TyCtxt::mk_type_list(self, v)
+    }
+
+    fn mk_binder_list(self, v: &[Binder<TyCtxt<'tcx>, ExistentialPredicate<TyCtxt<'tcx>>>]) -> &'tcx List<Binder<TyCtxt<'tcx>, ExistentialPredicate<TyCtxt<'tcx>>>> {
+        TyCtxt::mk_binder_list(self, v)
     }
 
     fn lifetimes_re_erased(self) -> ty::Region<'tcx> {
