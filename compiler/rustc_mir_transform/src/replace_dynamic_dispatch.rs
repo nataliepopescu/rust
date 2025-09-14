@@ -33,43 +33,16 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
         // FIXME is there a better way to do this?? (sans clone)
         //let binding = body.clone();
         //let local_decls = binding.local_decls();
+        debug!("LOCALS BEFORE ({:?})", body.local_decls().len());
         for (idx, local_decl) in body.local_decls().iter_enumerated() {
             debug!("-------idx: {:?}", idx);
             debug!("local_decl: {:?}", local_decl);
             debug!("mutability: {:?}", local_decl.mutability);
             debug!("ty: {:?}", local_decl.ty);
-            debug!("-TyKind:");
             id_ty(local_decl.ty);
-            /*
-            match local_decl.ty.kind() {
-                crate::ty::Bool => debug!("Bool"),
-                crate::ty::RawPtr(ty, m) => {
-                    debug!("RawPtr");
-                    debug!("mut: {:?}", m);
-                    debug!("inner ty: {:?}", ty);
-                    match ty.kind() {
-                        crate::ty::Dynamic(..) => debug!("Dynamic"),
-                        _ => {},
-                    }
-                },
-                crate::ty::Ref(reg, ty, m) => {
-                    debug!("Ref");
-                    debug!("reg: {:?}", reg);
-                    debug!("ty: {:?}", ty);
-                    debug!("mut: {:?}", m);
-                },
-                crate::ty::UnsafeBinder(..) => debug!("UnsafeBinder"),
-                crate::ty::Dynamic(..) => debug!("Dynamic"),
-                crate::ty::FnDef(..) => debug!("FnDef"),
-                crate::ty::FnPtr(..) => debug!("FnPtr"),
-                crate::ty::Adt(..) => debug!("Adt"),
-                crate::ty::Foreign(_) => debug!("Foreign"),
-                crate::ty::Pat(..) => debug!("Pat"),
-                _ => debug!("another"),
-            }
-            */
         }
 
+        debug!("RUN PASS");
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             match &data.terminator().kind {
                 TerminatorKind::Call { func, .. } => {
@@ -85,212 +58,15 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
             }
         }
 
-        /*
-        for block in body.basic_blocks_mut() {
-            debug!("\n\n\n\nNEW BLOCK\n");
-            for statement in &block.statements {
-                debug!("--StatementKind:");
-                match &statement.kind {
-                    StatementKind::Assign(boxed_assign) => {
-                        debug!("Assign");
-                        let (_place, rvalue) = *boxed_assign.clone();
-                        match rvalue {
-                            Rvalue::Use(op) => {
-                                debug!("RValue Kind: Use");
-                                match op {
-                                    Operand::Copy(_) => debug!("Copy"),
-                                    Operand::Move(_) => debug!("Move"),
-                                    Operand::Constant(_) => debug!("Constant"),
-                                }
-                            }
-                            Rvalue::BinaryOp(binop, boxed_ops) => {
-                                debug!("RValue Kind: BinaryOp");
-                                match binop {
-                                    BinOp::Eq => debug!("Binop: Eq"),
-                                    _ => debug!("Binop: another"),
-                                }
-                                let (op1, op2) = *boxed_ops;
-                                match op1 {
-                                    Operand::Copy(_) => debug!("Copy"),
-                                    Operand::Move(_) => debug!("Move"),
-                                    Operand::Constant(_) => debug!("Constant"),
-                                }
-                                match op2 {
-                                    Operand::Copy(_) => debug!("Copy"),
-                                    Operand::Move(_) => debug!("Move"),
-                                    Operand::Constant(_) => debug!("Constant"),
-                                }
-                            }
-                            Rvalue::Ref(region, borrowkind, _place) => {
-                                debug!("RValue Kind: Ref");
-                                match region.kind() {
-                                    RegionKind::ReErased => debug!("RegionKind: ReErased"),
-                                    _ => debug!("RegionKind: another"),
-                                }
-                                match borrowkind {
-                                    BorrowKind::Shared => debug!("BorrowKind: Shared"),
-                                    _ => debug!("BorrowKind: another"),
-                                }
-                            },
-                            Rvalue::Cast(castkind, op, ty) => {
-                                debug!("RValue Kind: Cast");
-                                match castkind {
-                                    CastKind::PtrToPtr => debug!("CastKind: PtrToPtr"),
-                                    CastKind::Transmute => debug!("CastKind: Transmute"),
-                                    _ => debug!("CastKind: another"),
-                                }
-                                match op {
-                                    Operand::Copy(_) => debug!("Copy"),
-                                    Operand::Move(_) => debug!("Move"),
-                                    Operand::Constant(_) => debug!("Constant"),
-                                }
-                                debug!("Ty: {:?}", ty);
-                            },
-                            Rvalue::RawPtr(rawptrkind, _place) => {
-                                debug!("RValue Kind: RawPtr");
-                                debug!("RawPtrKind::{:?}", rawptrkind);
-                            },
-                            _ => debug!("RValue Kind: another"),
-                        }
-                    }
-                    StatementKind::StorageLive(..) => debug!("StorageLive"),
-                    StatementKind::StorageDead(..) => debug!("StorageDead"),
-                    _ => debug!("another"),
-                }
-                debug!("{:?}", statement);
-            }
-
-            debug!("--TerminatorKind:");
-            // try to ID what to rewrite
-            match &block.terminator().kind {
-                TerminatorKind::Call {
-                    func: operand,
-                    args: op_args,
-                    destination: dst,
-                    target: bb_opt,
-                    unwind: unwind_act,
-                    call_source: callsource,
-                    fn_span: span,
-                } => {
-                    debug!("Call");
-                    debug!("func: {:?}", operand);
-                    match operand {
-                        Operand::Copy(_) => debug!("Copy"),
-                        Operand::Move(_) => debug!("Move"),
-                        Operand::Constant(const_op) => {
-                            debug!("Constant: {:?}", const_op);
-                            debug!("span: {:?}", (*const_op).span);
-                            debug!("user_ty: {:?}", (*const_op).user_ty);
-                            match (*const_op).const_ {
-                                Const::Ty(ty, c) => {
-                                    debug!("Const::Ty");
-                                    debug!("ty: {:?}", ty);
-                                    debug!("const: {:?}", c);
-                                },
-                                Const::Unevaluated(uneval_const, ty) => {
-                                    debug!("Const::Unevaluated");
-                                    debug!("UnevaluatedConst: {:?}", uneval_const);
-                                    debug!("Ty: {:?}", ty);
-                                },
-                                Const::Val(const_val, ty) => {
-                                    debug!("Const::Val");
-                                    debug!("ConstValue: {:?}", const_val);
-                                    debug!("Ty: {:?}", ty);
-                                    match ty.kind() {
-                                        crate::ty::FnDef(defid, rawlist) => {
-                                            debug!("defid: {:?}", defid);
-                                            debug!("rawlist: {:?}", rawlist);
-                                            // TODO check expected type of 
-                                            // first parameter here (_not_ the 
-                                            // arg, which may happen to be dyn,
-                                            // as we've seen in `into_raw()`)
-                                            debug!("def_kind: {:?}", tcx.def_kind(defid));
-                                            debug!("dbg string: {:?}", tcx.def_path_debug_str(*defid));
-                                            if tcx.def_path_debug_str(*defid).contains("Animal::speak") {
-                                                debug!("HARDCODED FIND");
-                                                let first_ty = rawlist.type_at(0);
-                                                debug!("***TYPE[0]: {:?}", first_ty);
-                                                debug!("is_trait: {:?}", first_ty.is_trait());
-                                                if first_ty.is_trait() {
-                                                    debug!("-----REPLACE");
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                    //debug!("is_fn?: {:?}", ty.is_fn());
-                                    //debug!("is_impl_trait?: {:?}", ty.is_impl_trait());
-                                    //debug!("is_fn_ptr?: {:?}", ty.is_fn_ptr());
-                                    //debug!("is_trait?: {:?}", ty.is_trait());
-                                    //debug!("ptr_metadata_ty: {:?}", ty.ptr_metadata_ty(tcx, |ty| ty));
-                                    //debug!("pointee_metadata_ty_or_projection: {:?}", ty.pointee_metadata_ty_or_projection(tcx));
-                                },
-                            }
-                        },
-                    }
-                    debug!("args: {:?}", op_args);
-                    debug!("destination: {:?}", dst);
-                    debug!("target: {:?}", bb_opt);
-                    debug!("unwind: {:?}", unwind_act);
-                    debug!("call_source: {:?}", callsource);
-                    debug!("fn_span: {:?}", span);
-                    /*
-                    for (i, arg) in op_args.into_iter().enumerate() {
-                        if i != 0 {
-                            continue;
-                        }
-                        match &arg.node {
-                            Operand::Move(place) 
-                            | Operand::Copy(place) => {
-                                debug!("ArgOp: Move/Copy");
-                                let place_ty = place.ty(local_decls, tcx);
-                                let deref = place_ty.ty.builtin_deref(false);
-                                // FIXME this check also admits static dispatch 
-                                // calls that simply happen to have a trait 
-                                // object as their first argument 
-                                // (e.g. Box::into_raw() takes in the trait 
-                                // object we want to convert into a raw ptr)
-                                // TODO how else to differentiate?
-                                if deref.is_some() && deref.unwrap().is_trait() {
-                                    debug!("-----REPLACE");
-                                    debug!("deref: {:?}", deref.unwrap());
-                                    //debug!("ptr_metadata_ty: {:?}", deref.unwrap().ptr_metadata_ty(tcx, |ty| ty));
-                                    debug!("\n\n\n\n\n\n\n");
-                                }
-                            },
-                            Operand::Constant(_) => debug!("ArgOp: Const"),
-                        }
-                    }
-                    */
-                },
-                TerminatorKind::SwitchInt {
-                    discr: op,
-                    targets: switchtargets, 
-                } => {
-                    debug!("SwitchInt");
-                    debug!("discr: {:?}", op);
-                    debug!("SwitchTargets-values: {:?}", switchtargets.all_values());
-                    debug!("SwitchTargets-targets: {:?}", switchtargets.all_targets());
-                },
-                TerminatorKind::Goto { target: bb } => {
-                    debug!("Goto");
-                    debug!("target: {:?}", bb);
-                },
-                TerminatorKind::Drop {
-                    place, target, unwind, replace, drop, async_fut
-                } => {
-                    debug!("Drop");
-                    debug!("place: {:?}", place);
-                    debug!("target: {:?}", target);
-                    debug!("unwind: {:?}", unwind);
-                    debug!("replace: {:?}", replace);
-                    debug!("drop: {:?}", drop);
-                    debug!("async_fut: {:?}", async_fut);
-                },
-                _ => debug!("another"),
-            }
+        debug!("LOCALS AFTER ({:?})", body.local_decls().len());
+        for (idx, local_decl) in body.local_decls().iter_enumerated() {
+            debug!("-------idx: {:?}", idx);
+            debug!("local_decl: {:?}", local_decl);
+            debug!("mutability: {:?}", local_decl.mutability);
+            debug!("ty: {:?}", local_decl.ty);
+            id_ty(local_decl.ty);
         }
-        */
+
     }
 
     fn is_required(&self) -> bool {
@@ -318,20 +94,17 @@ fn replace_dynamic_dispatch<'tcx>(
     // new locals: _22 and _21
     // - let mut _22: *const dyn Animal;
     // - scope 5 { let _21: std::ptr::DynMetadata<dyn Animal>; ... }
-    add_pm_locals(tcx, patch);
-
+    //
     // maintain target/unwind bb links
     // - old target: bb14 - drop dog (_20)
     // - new target: bb28 (how to ref non-brittle-y?)
     // - old unwind: bb22 - cleanup drop dog (_20)
     // - new unwind: bb33 (how to ref non-brittle-y?)
     // /////////////////////////
-
-
-
-
-
-
+    //add_const_dyn_traitobj_local();
+    add_dynmetadata_local(tcx, patch);
+    //add_raw_const();
+    //add_pm_call();
 
     // /////////////////////////
     // add block (cat ptr_metadata):
@@ -399,44 +172,52 @@ fn replace_dynamic_dispatch<'tcx>(
     // /////////////////////////
 }
 
-fn add_pm_locals<'tcx>(
+fn add_dynmetadata_local<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
 ) {
-    let pm_did = DefId { index: DefIndex::from_u32(2453), krate: CrateNum::new(2) };
-    let pm_variant_field0 = FieldDef {
+    // add: - scope 5 { let _21: std::ptr::DynMetadata<dyn Animal>; ... }
+    // TODO scope 5 part?
+
+    // construct DynMetadata variant fields
+    let dynmetadata_variant_field0 = FieldDef {
         did: DefId { index: DefIndex::from_u32(2455), krate: CrateNum::new(2) },
         name: Symbol::new(4918),
         vis: Visibility::Restricted(LocalDefId { local_def_index: DefIndex::from_u32(2430) }.into()),
         safety: Safety::Safe,
         value: None,
     };
-    let pm_variant_field1 = FieldDef {
+    let dynmetadata_variant_field1 = FieldDef {
         did: DefId { index: DefIndex::from_u32(2456), krate: CrateNum::new(2) },
         name: Symbol::new(4919),
         vis: Visibility::Restricted(LocalDefId { local_def_index: DefIndex::from_u32(2430) }.into()),
         safety: Safety::Safe,
         value: None,
     };
-    let mut pm_variant_fields = IndexVec::new();
-    let _ = pm_variant_fields.push(pm_variant_field0);
-    let _ = pm_variant_fields.push(pm_variant_field1);
-    let pm_variant = VariantDef::new(
+    let mut dynmetadata_variant_fields = IndexVec::new();
+    let _ = dynmetadata_variant_fields.push(dynmetadata_variant_field0);
+    let _ = dynmetadata_variant_fields.push(dynmetadata_variant_field1);
+
+    // construct DynMetadata variants
+    let dynmetadata_did = DefId { index: DefIndex::from_u32(2453), krate: CrateNum::new(2) };
+    let dynmetadata_variant = VariantDef::new(
         Symbol::new(2850),
-        Some(pm_did),
+        Some(dynmetadata_did),
         None,
         VariantDiscr::Relative(0),
-        pm_variant_fields,
-        pm_did,
+        dynmetadata_variant_fields,
+        dynmetadata_did,
         None,
         false,
     );
-    let mut pm_variants = IndexVec::new();
-    let _ = pm_variants.push(pm_variant);
-    let pm_adt_def = tcx.mk_adt_def(
-        pm_did,
+    let mut dynmetadata_variants = IndexVec::new();
+    let _ = dynmetadata_variants.push(dynmetadata_variant);
+
+    // construct DynMetadata AdtDef
+    let dynmetadata_adt_def = tcx.mk_adt_def(
+        DefId { index: DefIndex::from_u32(2430), krate: CrateNum::new(2) },
         AdtKind::Struct,
-        pm_variants,
+        dynmetadata_variants,
         ReprOptions {
             int: None,
             align: None,
@@ -445,25 +226,31 @@ fn add_pm_locals<'tcx>(
             field_shuffle_seed: Hash64::new(11036929796519478320),
         }
     );
-    // ty: Dynamic(RawList([(), Binder<( , )>], ReErased, DynKind::Dyn)
+
+    // construct DynMetadata GenericArgsRef
+    let dummy_args: Vec<GenericArg<'tcx>> = Vec::new();
+    let ty_binder_list = tcx.mk_binder_list(&[Binder::dummy(ExistentialPredicate::Trait(
+        ExistentialTraitRef::new(
+            tcx,
+            DefId { index: DefIndex::from_u32(3), krate: CrateNum::new(0) },
+            dummy_args,
+        )
+    ))]);
     let trait_obj_tykind = Dynamic(
-        tcx.mk_type_list(&[Binder::dummy(ExistentialPredicate::Trait(
-            ExistentialTraitRef::new(
-                tcx,
-                DefId { index: DefIndex::from_u32(3), krate: CrateNum::new(0) },
-                []
-            )
-        ))]),
+        ty_binder_list,
         Region::new_from_kind(tcx, RegionKind::ReErased),
         DynKind::Dyn,
     );
     let trait_obj_ty = tcx.mk_ty_from_kind(trait_obj_tykind);
     let gen_args_ref = tcx.mk_args(&[GenericArg::from(trait_obj_ty)]);
+
+    // add DynMetadata local to patch
+    debug!("HERE0");
     patch.new_local_with_info(
         // ty
         Ty::new_adt(
             tcx,
-            pm_adt_def,
+            dynmetadata_adt_def,
             gen_args_ref,
         ),
         // dummy span
@@ -471,11 +258,13 @@ fn add_pm_locals<'tcx>(
         // dummy local_info 
         LocalInfo::Boring,
     );
+    debug!("HERE1");
 }
 
 // Identification helpers
 
 fn id_ty<'tcx>(ty: Ty<'tcx>) {
+    debug!("-TyKind:");
     match ty.kind() {
         crate::ty::Bool => debug!("Bool"),
         crate::ty::RawPtr(ty, m) => {
@@ -495,6 +284,7 @@ fn id_ty<'tcx>(ty: Ty<'tcx>) {
             debug!("Dynamic");
             debug!("region: {:?}", region.kind());
             debug!("dynkind: {:?}", dynkind);
+            debug!("rawlist...");
             for (i, binder) in rawlist.iter().enumerate() {
                 debug!("--idx: {:?}", i);
                 if let Some(ty) = binder.no_bound_vars() {
@@ -516,6 +306,11 @@ fn id_ty<'tcx>(ty: Ty<'tcx>) {
         crate::ty::Adt(def, rawlist) => {
             debug!("Adt");
             debug!("def: {:?}", def);
+            let did = def.did();
+            debug!("did.index: {:?}", did.index);
+            debug!("did.krate: {:?}", did.krate);
+            debug!("def.kind(): {:?}", def.adt_kind());
+            debug!("def.repr(): {:?}", def.repr());
             debug!("rawlist: {:?}", rawlist);
             debug!("genargs...");
             for (gidx, genarg) in rawlist.iter().enumerate() {
@@ -529,11 +324,6 @@ fn id_ty<'tcx>(ty: Ty<'tcx>) {
                     id_ty(type_opt.unwrap());
                 }
             }
-            let did = def.did();
-            debug!("did.index: {:?}", did.index);
-            debug!("did.krate: {:?}", did.krate);
-            debug!("def.kind(): {:?}", def.adt_kind());
-            debug!("def.repr(): {:?}", def.repr());
             id_adt_variants(*def);
         },
         crate::ty::Foreign(_) => debug!("Foreign"),
@@ -554,10 +344,220 @@ fn id_adt_variants<'tcx>(def: AdtDef<'tcx>) {
             debug!("name: {:?}", field.name.as_u32());
             debug!("visibility: {:?}", field.vis);
             match field.vis {
-                Visibility::Restricted(id) => debug!("restricted id: {:?}", id),
+                Visibility::Restricted(id) => {
+                    debug!("restricted id: {:?}", id);
+                    debug!("id.index: {:?}", id.index);
+                    debug!("id.krate: {:?}", id.krate);
+                }
                 _ => {},
             }
         }
     }
 }
 
+/*
+for block in body.basic_blocks_mut() {
+    debug!("\n\n\n\nNEW BLOCK\n");
+    for statement in &block.statements {
+        debug!("--StatementKind:");
+        match &statement.kind {
+            StatementKind::Assign(boxed_assign) => {
+                debug!("Assign");
+                let (_place, rvalue) = *boxed_assign.clone();
+                match rvalue {
+                    Rvalue::Use(op) => {
+                        debug!("RValue Kind: Use");
+                        match op {
+                            Operand::Copy(_) => debug!("Copy"),
+                            Operand::Move(_) => debug!("Move"),
+                            Operand::Constant(_) => debug!("Constant"),
+                        }
+                    }
+                    Rvalue::BinaryOp(binop, boxed_ops) => {
+                        debug!("RValue Kind: BinaryOp");
+                        match binop {
+                            BinOp::Eq => debug!("Binop: Eq"),
+                            _ => debug!("Binop: another"),
+                        }
+                        let (op1, op2) = *boxed_ops;
+                        match op1 {
+                            Operand::Copy(_) => debug!("Copy"),
+                            Operand::Move(_) => debug!("Move"),
+                            Operand::Constant(_) => debug!("Constant"),
+                        }
+                        match op2 {
+                            Operand::Copy(_) => debug!("Copy"),
+                            Operand::Move(_) => debug!("Move"),
+                            Operand::Constant(_) => debug!("Constant"),
+                        }
+                    }
+                    Rvalue::Ref(region, borrowkind, _place) => {
+                        debug!("RValue Kind: Ref");
+                        match region.kind() {
+                            RegionKind::ReErased => debug!("RegionKind: ReErased"),
+                            _ => debug!("RegionKind: another"),
+                        }
+                        match borrowkind {
+                            BorrowKind::Shared => debug!("BorrowKind: Shared"),
+                            _ => debug!("BorrowKind: another"),
+                        }
+                    },
+                    Rvalue::Cast(castkind, op, ty) => {
+                        debug!("RValue Kind: Cast");
+                        match castkind {
+                            CastKind::PtrToPtr => debug!("CastKind: PtrToPtr"),
+                            CastKind::Transmute => debug!("CastKind: Transmute"),
+                            _ => debug!("CastKind: another"),
+                        }
+                        match op {
+                            Operand::Copy(_) => debug!("Copy"),
+                            Operand::Move(_) => debug!("Move"),
+                            Operand::Constant(_) => debug!("Constant"),
+                        }
+                        debug!("Ty: {:?}", ty);
+                    },
+                    Rvalue::RawPtr(rawptrkind, _place) => {
+                        debug!("RValue Kind: RawPtr");
+                        debug!("RawPtrKind::{:?}", rawptrkind);
+                    },
+                    _ => debug!("RValue Kind: another"),
+                }
+            }
+            StatementKind::StorageLive(..) => debug!("StorageLive"),
+            StatementKind::StorageDead(..) => debug!("StorageDead"),
+            _ => debug!("another"),
+        }
+        debug!("{:?}", statement);
+    }
+
+    debug!("--TerminatorKind:");
+    // try to ID what to rewrite
+    match &block.terminator().kind {
+        TerminatorKind::Call {
+            func: operand,
+            args: op_args,
+            destination: dst,
+            target: bb_opt,
+            unwind: unwind_act,
+            call_source: callsource,
+            fn_span: span,
+        } => {
+            debug!("Call");
+            debug!("func: {:?}", operand);
+            match operand {
+                Operand::Copy(_) => debug!("Copy"),
+                Operand::Move(_) => debug!("Move"),
+                Operand::Constant(const_op) => {
+                    debug!("Constant: {:?}", const_op);
+                    debug!("span: {:?}", (*const_op).span);
+                    debug!("user_ty: {:?}", (*const_op).user_ty);
+                    match (*const_op).const_ {
+                        Const::Ty(ty, c) => {
+                            debug!("Const::Ty");
+                            debug!("ty: {:?}", ty);
+                            debug!("const: {:?}", c);
+                        },
+                        Const::Unevaluated(uneval_const, ty) => {
+                            debug!("Const::Unevaluated");
+                            debug!("UnevaluatedConst: {:?}", uneval_const);
+                            debug!("Ty: {:?}", ty);
+                        },
+                        Const::Val(const_val, ty) => {
+                            debug!("Const::Val");
+                            debug!("ConstValue: {:?}", const_val);
+                            debug!("Ty: {:?}", ty);
+                            match ty.kind() {
+                                crate::ty::FnDef(defid, rawlist) => {
+                                    debug!("defid: {:?}", defid);
+                                    debug!("rawlist: {:?}", rawlist);
+                                    // TODO check expected type of 
+                                    // first parameter here (_not_ the 
+                                    // arg, which may happen to be dyn,
+                                    // as we've seen in `into_raw()`)
+                                    debug!("def_kind: {:?}", tcx.def_kind(defid));
+                                    debug!("dbg string: {:?}", tcx.def_path_debug_str(*defid));
+                                    if tcx.def_path_debug_str(*defid).contains("Animal::speak") {
+                                        debug!("HARDCODED FIND");
+                                        let first_ty = rawlist.type_at(0);
+                                        debug!("***TYPE[0]: {:?}", first_ty);
+                                        debug!("is_trait: {:?}", first_ty.is_trait());
+                                        if first_ty.is_trait() {
+                                            debug!("-----REPLACE");
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            //debug!("is_fn?: {:?}", ty.is_fn());
+                            //debug!("is_impl_trait?: {:?}", ty.is_impl_trait());
+                            //debug!("is_fn_ptr?: {:?}", ty.is_fn_ptr());
+                            //debug!("is_trait?: {:?}", ty.is_trait());
+                            //debug!("ptr_metadata_ty: {:?}", ty.ptr_metadata_ty(tcx, |ty| ty));
+                            //debug!("pointee_metadata_ty_or_projection: {:?}", ty.pointee_metadata_ty_or_projection(tcx));
+                        },
+                    }
+                },
+            }
+            debug!("args: {:?}", op_args);
+            debug!("destination: {:?}", dst);
+            debug!("target: {:?}", bb_opt);
+            debug!("unwind: {:?}", unwind_act);
+            debug!("call_source: {:?}", callsource);
+            debug!("fn_span: {:?}", span);
+            /*
+            for (i, arg) in op_args.into_iter().enumerate() {
+                if i != 0 {
+                    continue;
+                }
+                match &arg.node {
+                    Operand::Move(place) 
+                    | Operand::Copy(place) => {
+                        debug!("ArgOp: Move/Copy");
+                        let place_ty = place.ty(local_decls, tcx);
+                        let deref = place_ty.ty.builtin_deref(false);
+                        // FIXME this check also admits static dispatch 
+                        // calls that simply happen to have a trait 
+                        // object as their first argument 
+                        // (e.g. Box::into_raw() takes in the trait 
+                        // object we want to convert into a raw ptr)
+                        // TODO how else to differentiate?
+                        if deref.is_some() && deref.unwrap().is_trait() {
+                            debug!("-----REPLACE");
+                            debug!("deref: {:?}", deref.unwrap());
+                            //debug!("ptr_metadata_ty: {:?}", deref.unwrap().ptr_metadata_ty(tcx, |ty| ty));
+                            debug!("\n\n\n\n\n\n\n");
+                        }
+                    },
+                    Operand::Constant(_) => debug!("ArgOp: Const"),
+                }
+            }
+            */
+        },
+        TerminatorKind::SwitchInt {
+            discr: op,
+            targets: switchtargets, 
+        } => {
+            debug!("SwitchInt");
+            debug!("discr: {:?}", op);
+            debug!("SwitchTargets-values: {:?}", switchtargets.all_values());
+            debug!("SwitchTargets-targets: {:?}", switchtargets.all_targets());
+        },
+        TerminatorKind::Goto { target: bb } => {
+            debug!("Goto");
+            debug!("target: {:?}", bb);
+        },
+        TerminatorKind::Drop {
+            place, target, unwind, replace, drop, async_fut
+        } => {
+            debug!("Drop");
+            debug!("place: {:?}", place);
+            debug!("target: {:?}", target);
+            debug!("unwind: {:?}", unwind);
+            debug!("replace: {:?}", replace);
+            debug!("drop: {:?}", drop);
+            debug!("async_fut: {:?}", async_fut);
+        },
+        _ => debug!("another"),
+    }
+}
+*/
