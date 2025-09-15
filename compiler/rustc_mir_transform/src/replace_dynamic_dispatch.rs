@@ -12,10 +12,10 @@ use rustc_middle::ty::*; //{AdtDef, AdtDefData, Ty, TyCtxt}; //RegionKind
 use rustc_span::*;
 //use rustc_span::symbol::*;
 use rustc_span::def_id::*;
-use rustc_abi::*;
-use rustc_hir::Safety;
-use rustc_index::IndexVec;
-use rustc_hashes::Hash64;
+//use rustc_abi::*;
+//use rustc_hir::Safety;
+//use rustc_index::IndexVec;
+//use rustc_hashes::Hash64;
 //use rustc_data_structures::intern::Interned;
 
 use crate::patch::MirPatch;
@@ -57,6 +57,8 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                 _ => {},
             }
         }
+
+        patch.apply(body);
 
         debug!("LOCALS AFTER ({:?})", body.local_decls().len());
         for (idx, local_decl) in body.local_decls().iter_enumerated() {
@@ -101,8 +103,8 @@ fn replace_dynamic_dispatch<'tcx>(
     // - old unwind: bb22 - cleanup drop dog (_20)
     // - new unwind: bb33 (how to ref non-brittle-y?)
     // /////////////////////////
-    //add_const_dyn_traitobj_local();
-    add_dynmetadata_local(tcx, patch);
+    //let _ = add_const_dyn_traitobj_local();
+    let _ = add_dynmetadata_temp(tcx, patch);
     //add_raw_const();
     //add_pm_call();
 
@@ -172,60 +174,12 @@ fn replace_dynamic_dispatch<'tcx>(
     // /////////////////////////
 }
 
-fn add_dynmetadata_local<'tcx>(
+fn add_dynmetadata_temp<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
-) {
-    // add: - scope 5 { let _21: std::ptr::DynMetadata<dyn Animal>; ... }
-    // TODO scope 5 part?
-
-    // construct DynMetadata variant fields
-    let dynmetadata_variant_field0 = FieldDef {
-        did: DefId { index: DefIndex::from_u32(2455), krate: CrateNum::new(2) },
-        name: Symbol::new(4918),
-        vis: Visibility::Restricted(LocalDefId { local_def_index: DefIndex::from_u32(2430) }.into()),
-        safety: Safety::Safe,
-        value: None,
-    };
-    let dynmetadata_variant_field1 = FieldDef {
-        did: DefId { index: DefIndex::from_u32(2456), krate: CrateNum::new(2) },
-        name: Symbol::new(4919),
-        vis: Visibility::Restricted(LocalDefId { local_def_index: DefIndex::from_u32(2430) }.into()),
-        safety: Safety::Safe,
-        value: None,
-    };
-    let mut dynmetadata_variant_fields = IndexVec::new();
-    let _ = dynmetadata_variant_fields.push(dynmetadata_variant_field0);
-    let _ = dynmetadata_variant_fields.push(dynmetadata_variant_field1);
-
-    // construct DynMetadata variants
-    let dynmetadata_did = DefId { index: DefIndex::from_u32(2453), krate: CrateNum::new(2) };
-    let dynmetadata_variant = VariantDef::new(
-        Symbol::new(2850),
-        Some(dynmetadata_did),
-        None,
-        VariantDiscr::Relative(0),
-        dynmetadata_variant_fields,
-        dynmetadata_did,
-        None,
-        false,
-    );
-    let mut dynmetadata_variants = IndexVec::new();
-    let _ = dynmetadata_variants.push(dynmetadata_variant);
-
+) -> Local {
     // construct DynMetadata AdtDef
-    let dynmetadata_adt_def = tcx.mk_adt_def(
-        DefId { index: DefIndex::from_u32(2430), krate: CrateNum::new(2) },
-        AdtKind::Struct,
-        dynmetadata_variants,
-        ReprOptions {
-            int: None,
-            align: None,
-            pack: None,
-            flags: ReprFlags::empty(),
-            field_shuffle_seed: Hash64::new(11036929796519478320),
-        }
-    );
+    let dynmetadata_adt_def = tcx.adt_def(tcx.lang_items().dyn_metadata().unwrap());
 
     // construct DynMetadata GenericArgsRef
     let dummy_args: Vec<GenericArg<'tcx>> = Vec::new();
@@ -245,8 +199,7 @@ fn add_dynmetadata_local<'tcx>(
     let gen_args_ref = tcx.mk_args(&[GenericArg::from(trait_obj_ty)]);
 
     // add DynMetadata local to patch
-    debug!("HERE0");
-    patch.new_local_with_info(
+    patch.new_temp(
         // ty
         Ty::new_adt(
             tcx,
@@ -255,10 +208,7 @@ fn add_dynmetadata_local<'tcx>(
         ),
         // dummy span
         Span::new(BytePos(0), BytePos(0), SyntaxContext::root(), None),
-        // dummy local_info 
-        LocalInfo::Boring,
-    );
-    debug!("HERE1");
+    )
 }
 
 // Identification helpers
