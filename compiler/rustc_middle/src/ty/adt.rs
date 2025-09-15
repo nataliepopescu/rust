@@ -268,7 +268,7 @@ impl From<AdtKind> for DataTypeKind {
 
 impl AdtDefData {
     /// Creates a new `AdtDefData`.
-    pub fn new(
+    pub(super) fn new(
         tcx: TyCtxt<'_>,
         did: DefId,
         kind: AdtKind,

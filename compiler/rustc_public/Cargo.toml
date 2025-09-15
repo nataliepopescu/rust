@@ -16,7 +16,6 @@ scoped-tls = "1.0"
 serde = { version = "1.0.125", features = [ "derive" ] }
 tracing = "0.1"
 # tidy-alphabetical-end
-rustc_type_ir = { path = "../rustc_type_ir" }
 
 [features]
 # tidy-alphabetical-start
