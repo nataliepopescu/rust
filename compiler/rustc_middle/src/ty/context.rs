@@ -965,7 +965,6 @@ impl<'tcx> CtxtInterners<'tcx> {
             const_lists: InternedSet::with_capacity(N * 4),
             args: InternedSet::with_capacity(N * 4),
             type_lists: InternedSet::with_capacity(N * 4),
-            binder_lists: InternedSet::with_capacity(N * 4),
             region: InternedSet::with_capacity(N * 4),
             poly_existential_predicates: InternedSet::with_capacity(N / 4),
             canonical_var_kinds: InternedSet::with_capacity(N / 2),
