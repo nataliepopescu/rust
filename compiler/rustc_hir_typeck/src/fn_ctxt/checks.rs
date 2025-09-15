@@ -83,14 +83,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         *self.deferred_cast_checks.borrow_mut() = deferred_cast_checks;
     }
 
-    pub(in super::super) fn check_transmutes(&self) {
-        let mut deferred_transmute_checks = self.deferred_transmute_checks.borrow_mut();
-        debug!("FnCtxt::check_transmutes: {} deferred checks", deferred_transmute_checks.len());
-        for (from, to, hir_id) in deferred_transmute_checks.drain(..) {
-            self.check_transmute(from, to, hir_id);
-        }
-    }
-
     pub(in super::super) fn check_asms(&self) {
         let mut deferred_asm_checks = self.deferred_asm_checks.borrow_mut();
         debug!("FnCtxt::check_asm: {} deferred checks", deferred_asm_checks.len());
@@ -1920,7 +1912,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::StmtKind::Expr(ref expr) => {
                 // Check with expected type of `()`.
                 self.check_expr_has_type_or_error(expr, self.tcx.types.unit, |err| {
-                    if expr.can_have_side_effects() {
+                    if self.is_next_stmt_expr_continuation(stmt.hir_id)
+                        && let hir::ExprKind::Match(..) | hir::ExprKind::If(..) = expr.kind
+                    {
+                        // We have something like `match () { _ => true } && true`. Suggest
+                        // wrapping in parentheses. We find the statement or expression
+                        // following the `match` (`&& true`) and see if it is something that
+                        // can reasonably be interpreted as a binop following an expression.
+                        err.multipart_suggestion(
+                            "parentheses are required to parse this as an expression",
+                            vec![
+                                (expr.span.shrink_to_lo(), "(".to_string()),
+                                (expr.span.shrink_to_hi(), ")".to_string()),
+                            ],
+                            Applicability::MachineApplicable,
+                        );
+                    } else if expr.can_have_side_effects() {
                         self.suggest_semicolon_at_end(expr.span, err);
                     }
                 });
@@ -2347,7 +2354,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // We want it to always point to the trait item.
             // If we're pointing at an inherent function, we don't need to do anything,
             // so we fetch the parent and verify if it's a trait item.
-            && let maybe_trait_item_def_id = assoc_item.trait_item_def_id.unwrap_or(def_id)
+            && let Ok(maybe_trait_item_def_id) = assoc_item.trait_item_or_self()
             && let maybe_trait_def_id = self.tcx.parent(maybe_trait_item_def_id)
             // Just an easy way to check "trait_def_id == Fn/FnMut/FnOnce"
             && let Some(call_kind) = self.tcx.fn_trait_kind_from_def_id(maybe_trait_def_id)

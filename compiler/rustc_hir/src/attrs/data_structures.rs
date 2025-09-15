@@ -1,14 +1,20 @@
+use std::borrow::Cow;
+use std::path::PathBuf;
+
 pub use ReprAttr::*;
 use rustc_abi::Align;
 use rustc_ast::token::CommentKind;
 use rustc_ast::{AttrStyle, ast};
+use rustc_error_messages::{DiagArgValue, IntoDiagArg};
 use rustc_macros::{Decodable, Encodable, HashStable_Generic, PrintAttribute};
 use rustc_span::def_id::DefId;
 use rustc_span::hygiene::Transparency;
 use rustc_span::{Ident, Span, Symbol};
+pub use rustc_target::spec::SanitizerSet;
 use thin_vec::ThinVec;
 
 use crate::attrs::pretty_printing::PrintAttribute;
+use crate::limit::Limit;
 use crate::{DefaultBodyStability, PartialConstStability, RustcVersion, Stability};
 
 #[derive(Copy, Clone, PartialEq, Encodable, Decodable, Debug, HashStable_Generic, PrintAttribute)]
@@ -205,6 +211,158 @@ pub enum Linkage {
     WeakODR,
 }
 
+#[derive(Clone, Copy, Decodable, Debug, Encodable, PartialEq)]
+#[derive(HashStable_Generic, PrintAttribute)]
+pub enum MirDialect {
+    Analysis,
+    Built,
+    Runtime,
+}
+
+impl IntoDiagArg for MirDialect {
+    fn into_diag_arg(self, _path: &mut Option<PathBuf>) -> DiagArgValue {
+        let arg = match self {
+            MirDialect::Analysis => "analysis",
+            MirDialect::Built => "built",
+            MirDialect::Runtime => "runtime",
+        };
+        DiagArgValue::Str(Cow::Borrowed(arg))
+    }
+}
+
+#[derive(Clone, Copy, Decodable, Debug, Encodable, PartialEq)]
+#[derive(HashStable_Generic, PrintAttribute)]
+pub enum MirPhase {
+    Initial,
+    PostCleanup,
+    Optimized,
+}
+
+impl IntoDiagArg for MirPhase {
+    fn into_diag_arg(self, _path: &mut Option<PathBuf>) -> DiagArgValue {
+        let arg = match self {
+            MirPhase::Initial => "initial",
+            MirPhase::PostCleanup => "post-cleanup",
+            MirPhase::Optimized => "optimized",
+        };
+        DiagArgValue::Str(Cow::Borrowed(arg))
+    }
+}
+
+/// Different ways that the PE Format can decorate a symbol name.
+/// From <https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#import-name-type>
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Encodable,
+    Decodable,
+    HashStable_Generic,
+    PartialEq,
+    Eq,
+    PrintAttribute
+)]
+pub enum PeImportNameType {
+    /// IMPORT_ORDINAL
+    /// Uses the ordinal (i.e., a number) rather than the name.
+    Ordinal(u16),
+    /// Same as IMPORT_NAME
+    /// Name is decorated with all prefixes and suffixes.
+    Decorated,
+    /// Same as IMPORT_NAME_NOPREFIX
+    /// Prefix (e.g., the leading `_` or `@`) is skipped, but suffix is kept.
+    NoPrefix,
+    /// Same as IMPORT_NAME_UNDECORATE
+    /// Prefix (e.g., the leading `_` or `@`) and suffix (the first `@` and all
+    /// trailing characters) are skipped.
+    Undecorated,
+}
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Encodable,
+    Decodable,
+    PrintAttribute
+)]
+#[derive(HashStable_Generic)]
+pub enum NativeLibKind {
+    /// Static library (e.g. `libfoo.a` on Linux or `foo.lib` on Windows/MSVC)
+    Static {
+        /// Whether to bundle objects from static library into produced rlib
+        bundle: Option<bool>,
+        /// Whether to link static library without throwing any object files away
+        whole_archive: Option<bool>,
+    },
+    /// Dynamic library (e.g. `libfoo.so` on Linux)
+    /// or an import library corresponding to a dynamic library (e.g. `foo.lib` on Windows/MSVC).
+    Dylib {
+        /// Whether the dynamic library will be linked only if it satisfies some undefined symbols
+        as_needed: Option<bool>,
+    },
+    /// Dynamic library (e.g. `foo.dll` on Windows) without a corresponding import library.
+    /// On Linux, it refers to a generated shared library stub.
+    RawDylib,
+    /// A macOS-specific kind of dynamic libraries.
+    Framework {
+        /// Whether the framework will be linked only if it satisfies some undefined symbols
+        as_needed: Option<bool>,
+    },
+    /// Argument which is passed to linker, relative order with libraries and other arguments
+    /// is preserved
+    LinkArg,
+
+    /// Module imported from WebAssembly
+    WasmImportModule,
+
+    /// The library kind wasn't specified, `Dylib` is currently used as a default.
+    Unspecified,
+}
+
+impl NativeLibKind {
+    pub fn has_modifiers(&self) -> bool {
+        match self {
+            NativeLibKind::Static { bundle, whole_archive } => {
+                bundle.is_some() || whole_archive.is_some()
+            }
+            NativeLibKind::Dylib { as_needed } | NativeLibKind::Framework { as_needed } => {
+                as_needed.is_some()
+            }
+            NativeLibKind::RawDylib
+            | NativeLibKind::Unspecified
+            | NativeLibKind::LinkArg
+            | NativeLibKind::WasmImportModule => false,
+        }
+    }
+
+    pub fn is_statically_included(&self) -> bool {
+        matches!(self, NativeLibKind::Static { .. })
+    }
+
+    pub fn is_dllimport(&self) -> bool {
+        matches!(
+            self,
+            NativeLibKind::Dylib { .. } | NativeLibKind::RawDylib | NativeLibKind::Unspecified
+        )
+    }
+}
+
+#[derive(Debug, Encodable, Decodable, Clone, HashStable_Generic, PrintAttribute)]
+pub struct LinkEntry {
+    pub span: Span,
+    pub kind: NativeLibKind,
+    pub name: Symbol,
+    pub cfg: Option<CfgEntry>,
+    pub verbatim: Option<bool>,
+    pub import_name_type: Option<(PeImportNameType, Span)>,
+}
+
 /// Represents parsed *built-in* inert attributes.
 ///
 /// ## Overview
@@ -324,6 +482,12 @@ pub enum AttributeKind {
     /// Represents `#[coverage(..)]`.
     Coverage(Span, CoverageAttrKind),
 
+    /// Represents `#[crate_name = ...]`
+    CrateName { name: Symbol, name_span: Span, attr_span: Span, style: AttrStyle },
+
+    /// Represents `#[custom_mir]`.
+    CustomMir(Option<(MirDialect, Span)>, Option<(MirPhase, Span)>, Span),
+
     ///Represents `#[rustc_deny_explicit_impl]`.
     DenyExplicitImpl(Span),
 
@@ -369,6 +533,9 @@ pub enum AttributeKind {
     /// Represents `#[inline]` and `#[rustc_force_inline]`.
     Inline(InlineAttr, Span),
 
+    /// Represents `#[link]`.
+    Link(ThinVec<LinkEntry>, Span),
+
     /// Represents `#[link_name]`.
     LinkName { name: Symbol, span: Span },
 
@@ -399,6 +566,9 @@ pub enum AttributeKind {
     /// Represents [`#[may_dangle]`](https://std-dev-guide.rust-lang.org/tricky/may-dangle.html).
     MayDangle(Span),
 
+    /// Represents `#[move_size_limit]`
+    MoveSizeLimit { attr_span: Span, limit_span: Span, limit: Limit },
+
     /// Represents `#[must_use]`.
     MustUse {
         span: Span,
@@ -409,11 +579,17 @@ pub enum AttributeKind {
     /// Represents `#[naked]`
     Naked(Span),
 
+    /// Represents `#[no_core]`
+    NoCore(Span),
+
     /// Represents `#[no_implicit_prelude]`
     NoImplicitPrelude(Span),
 
     /// Represents `#[no_mangle]`
     NoMangle(Span),
+
+    /// Represents `#[no_std]`
+    NoStd(Span),
 
     /// Represents `#[non_exhaustive]`
     NonExhaustive(Span),
@@ -430,6 +606,9 @@ pub enum AttributeKind {
     /// Represents `#[path]`
     Path(Symbol, Span),
 
+    /// Represents `#[pattern_complexity_limit]`
+    PatternComplexityLimit { attr_span: Span, limit_span: Span, limit: Limit },
+
     /// Represents `#[pointee]`
     Pointee(Span),
 
@@ -445,6 +624,9 @@ pub enum AttributeKind {
     /// Represents `#[rustc_pub_transparent]` (used by the `repr_transparent_external_private_fields` lint).
     PubTransparent(Span),
 
+    /// Represents [`#[recursion_limit]`](https://doc.rust-lang.org/reference/attributes/limits.html#the-recursion_limit-attribute)
+    RecursionLimit { attr_span: Span, limit_span: Span, limit: Limit },
+
     /// Represents [`#[repr]`](https://doc.rust-lang.org/stable/reference/type-layout.html#representations).
     Repr { reprs: ThinVec<(ReprAttr, Span)>, first_span: Span },
 
@@ -459,6 +641,12 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_object_lifetime_default]`.
     RustcObjectLifetimeDefault,
+
+    /// Represents `#[sanitize]`
+    ///
+    /// the on set and off set are distjoint since there's a third option: unset.
+    /// a node may not set the sanitizer setting in which case it inherits from parents.
+    Sanitize { on_set: SanitizerSet, off_set: SanitizerSet, span: Span },
 
     /// Represents `#[should_panic]`
     ShouldPanic { reason: Option<Symbol>, span: Span },
@@ -479,14 +667,18 @@ pub enum AttributeKind {
     /// Represents `#[rustc_std_internal_symbol]`.
     StdInternalSymbol(Span),
 
-    /// Represents `#[target_feature(enable = "...")]`
-    TargetFeature(ThinVec<(Symbol, Span)>, Span),
+    /// Represents `#[target_feature(enable = "...")]` and
+    /// `#[unsafe(force_target_feature(enable = "...")]`.
+    TargetFeature { features: ThinVec<(Symbol, Span)>, attr_span: Span, was_forced: bool },
 
     /// Represents `#[track_caller]`
     TrackCaller(Span),
 
     /// Represents `#[type_const]`.
     TypeConst(Span),
+
+    /// Represents `#[type_length_limit]`
+    TypeLengthLimit { attr_span: Span, limit_span: Span, limit: Limit },
 
     /// Represents `#[rustc_unsafe_specialization_marker]`.
     UnsafeSpecializationMarker(Span),

@@ -3,11 +3,11 @@
 use rustc_type_ir::data_structures::IndexSet;
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
-use rustc_type_ir::lang_items::TraitSolverLangItem;
+use rustc_type_ir::lang_items::SolverTraitLangItem;
 use rustc_type_ir::solve::{CanonicalResponse, SizedTraitKind};
 use rustc_type_ir::{
-    self as ty, Interner, Movability, TraitPredicate, TraitRef, TypeVisitableExt as _, TypingMode,
-    Upcast as _, elaborate,
+    self as ty, Interner, Movability, PredicatePolarity, TraitPredicate, TraitRef,
+    TypeVisitableExt as _, TypingMode, Upcast as _, elaborate,
 };
 use tracing::{debug, instrument, trace};
 
@@ -39,7 +39,7 @@ where
         self.with_replaced_self_ty(cx, self_ty)
     }
 
-    fn trait_def_id(self, _: I) -> I::DefId {
+    fn trait_def_id(self, _: I) -> I::TraitId {
         self.def_id()
     }
 
@@ -54,7 +54,8 @@ where
     fn consider_impl_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, TraitPredicate<I>>,
-        impl_def_id: I::DefId,
+        impl_def_id: I::ImplId,
+        then: impl FnOnce(&mut EvalCtxt<'_, D>, Certainty) -> QueryResult<I>,
     ) -> Result<Candidate<I>, NoSolution> {
         let cx = ecx.cx();
 
@@ -91,13 +92,13 @@ where
         };
 
         ecx.probe_trait_candidate(CandidateSource::Impl(impl_def_id)).enter(|ecx| {
-            let impl_args = ecx.fresh_args_for_item(impl_def_id);
+            let impl_args = ecx.fresh_args_for_item(impl_def_id.into());
             ecx.record_impl_args(impl_args);
             let impl_trait_ref = impl_trait_ref.instantiate(cx, impl_args);
 
             ecx.eq(goal.param_env, goal.predicate.trait_ref, impl_trait_ref)?;
             let where_clause_bounds = cx
-                .predicates_of(impl_def_id)
+                .predicates_of(impl_def_id.into())
                 .iter_instantiated(cx, impl_args)
                 .map(|pred| goal.with(cx, pred));
             ecx.add_goals(GoalSource::ImplWhereBound, where_clause_bounds);
@@ -112,7 +113,7 @@ where
                     .map(|pred| goal.with(cx, pred)),
             );
 
-            ecx.evaluate_added_goals_and_make_canonical_response(maximal_certainty)
+            then(ecx, maximal_certainty)
         })
     }
 
@@ -131,21 +132,28 @@ where
     ) -> Result<(), NoSolution> {
         fn trait_def_id_matches<I: Interner>(
             cx: I,
-            clause_def_id: I::DefId,
-            goal_def_id: I::DefId,
+            clause_def_id: I::TraitId,
+            goal_def_id: I::TraitId,
+            polarity: PredicatePolarity,
         ) -> bool {
             clause_def_id == goal_def_id
             // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
             // check for a `MetaSized` supertrait being matched against a `Sized` assumption.
             //
             // `PointeeSized` bounds are syntactic sugar for a lack of bounds so don't need this.
-                || (cx.is_lang_item(clause_def_id, TraitSolverLangItem::Sized)
-                    && cx.is_lang_item(goal_def_id, TraitSolverLangItem::MetaSized))
+                || (polarity == PredicatePolarity::Positive
+                    && cx.is_trait_lang_item(clause_def_id, SolverTraitLangItem::Sized)
+                    && cx.is_trait_lang_item(goal_def_id, SolverTraitLangItem::MetaSized))
         }
 
         if let Some(trait_clause) = assumption.as_trait_clause()
             && trait_clause.polarity() == goal.predicate.polarity
-            && trait_def_id_matches(ecx.cx(), trait_clause.def_id(), goal.predicate.def_id())
+            && trait_def_id_matches(
+                ecx.cx(),
+                trait_clause.def_id(),
+                goal.predicate.def_id(),
+                goal.predicate.polarity,
+            )
             && DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
                 goal.predicate.trait_ref.args,
                 trait_clause.skip_binder().trait_ref.args,
@@ -168,8 +176,10 @@ where
         // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
         // check for a `Sized` subtrait when looking for `MetaSized`. `PointeeSized` bounds
         // are syntactic sugar for a lack of bounds so don't need this.
-        if ecx.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::MetaSized)
-            && ecx.cx().is_lang_item(trait_clause.def_id(), TraitSolverLangItem::Sized)
+        // We don't need to check polarity, `fast_reject_assumption` already rejected non-`Positive`
+        // polarity `Sized` assumptions as matching non-`Positive` `MetaSized` goals.
+        if ecx.cx().is_trait_lang_item(goal.predicate.def_id(), SolverTraitLangItem::MetaSized)
+            && ecx.cx().is_trait_lang_item(trait_clause.def_id(), SolverTraitLangItem::Sized)
         {
             let meta_sized_clause =
                 trait_predicate_with_def_id(ecx.cx(), trait_clause, goal.predicate.def_id());
@@ -254,7 +264,7 @@ where
 
         ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
             let nested_obligations = cx
-                .predicates_of(goal.predicate.def_id())
+                .predicates_of(goal.predicate.def_id().into())
                 .iter_instantiated(cx, goal.predicate.trait_ref.args)
                 .map(|p| goal.with(cx, p));
             // While you could think of trait aliases to have a single builtin impl
@@ -363,7 +373,7 @@ where
         // A built-in `Fn` impl only holds if the output is sized.
         // (FIXME: technically we only need to check this if the type is a fn ptr...)
         let output_is_sized_pred = tupled_inputs_and_output.map_bound(|(_, output)| {
-            ty::TraitRef::new(cx, cx.require_lang_item(TraitSolverLangItem::Sized), [output])
+            ty::TraitRef::new(cx, cx.require_trait_lang_item(SolverTraitLangItem::Sized), [output])
         });
 
         let pred = tupled_inputs_and_output
@@ -405,7 +415,7 @@ where
             |AsyncCallableRelevantTypes { output_coroutine_ty, .. }| {
                 ty::TraitRef::new(
                     cx,
-                    cx.require_lang_item(TraitSolverLangItem::Sized),
+                    cx.require_trait_lang_item(SolverTraitLangItem::Sized),
                     [output_coroutine_ty],
                 )
             },
@@ -748,7 +758,7 @@ where
                             cx,
                             ty::TraitRef::new(
                                 cx,
-                                cx.require_lang_item(TraitSolverLangItem::Copy),
+                                cx.require_trait_lang_item(SolverTraitLangItem::Copy),
                                 [ty],
                             ),
                         ),
@@ -848,7 +858,7 @@ where
 fn trait_predicate_with_def_id<I: Interner>(
     cx: I,
     clause: ty::Binder<I, ty::TraitPredicate<I>>,
-    did: I::DefId,
+    did: I::TraitId,
 ) -> I::Clause {
     clause
         .map_bound(|c| TraitPredicate {
@@ -947,7 +957,11 @@ where
                 GoalSource::ImplWhereBound,
                 goal.with(
                     cx,
-                    ty::TraitRef::new(cx, cx.require_lang_item(TraitSolverLangItem::Sized), [a_ty]),
+                    ty::TraitRef::new(
+                        cx,
+                        cx.require_trait_lang_item(SolverTraitLangItem::Sized),
+                        [a_ty],
+                    ),
                 ),
             );
 
@@ -972,7 +986,7 @@ where
         // We may upcast to auto traits that are either explicitly listed in
         // the object type's bounds, or implied by the principal trait ref's
         // supertraits.
-        let a_auto_traits: IndexSet<I::DefId> = a_data
+        let a_auto_traits: IndexSet<I::TraitId> = a_data
             .auto_traits()
             .into_iter()
             .chain(a_data.principal_def_id().into_iter().flat_map(|principal_def_id| {
@@ -1134,7 +1148,7 @@ where
                 cx,
                 ty::TraitRef::new(
                     cx,
-                    cx.require_lang_item(TraitSolverLangItem::Unsize),
+                    cx.require_trait_lang_item(SolverTraitLangItem::Unsize),
                     [a_tail_ty, b_tail_ty],
                 ),
             ),
@@ -1199,7 +1213,9 @@ where
             // takes precedence over the structural auto trait candidate being
             // assembled.
             ty::Coroutine(def_id, _)
-                if self.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::Unpin) =>
+                if self
+                    .cx()
+                    .is_trait_lang_item(goal.predicate.def_id(), SolverTraitLangItem::Unpin) =>
             {
                 match self.cx().coroutine_movability(def_id) {
                     Movability::Static => Some(Err(NoSolution)),

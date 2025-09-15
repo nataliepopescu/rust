@@ -136,6 +136,10 @@ fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -> hi
         | sym::round_ties_even_f64
         | sym::round_ties_even_f128
         | sym::autodiff
+        | sym::prefetch_read_data
+        | sym::prefetch_write_data
+        | sym::prefetch_read_instruction
+        | sym::prefetch_write_instruction
         | sym::const_eval_select => hir::Safety::Safe,
         _ => hir::Safety::Unsafe,
     };
@@ -218,7 +222,7 @@ pub(crate) fn check_intrinsic_type(
         | sym::prefetch_write_data
         | sym::prefetch_read_instruction
         | sym::prefetch_write_instruction => {
-            (1, 0, vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.i32], tcx.types.unit)
+            (1, 1, vec![Ty::new_imm_ptr(tcx, param(0))], tcx.types.unit)
         }
         sym::needs_drop => (1, 0, vec![], tcx.types.bool),
 
@@ -445,6 +449,9 @@ pub(crate) fn check_intrinsic_type(
         }
         sym::unchecked_shl | sym::unchecked_shr => (2, 0, vec![param(0), param(1)], param(0)),
         sym::rotate_left | sym::rotate_right => (1, 0, vec![param(0), tcx.types.u32], param(0)),
+        sym::unchecked_funnel_shl | sym::unchecked_funnel_shr => {
+            (1, 0, vec![param(0), param(0), tcx.types.u32], param(0))
+        }
         sym::unchecked_add | sym::unchecked_sub | sym::unchecked_mul => {
             (1, 0, vec![param(0), param(0)], param(0))
         }

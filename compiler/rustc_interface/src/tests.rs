@@ -8,6 +8,7 @@ use rustc_abi::Align;
 use rustc_data_structures::profiling::TimePassesFormat;
 use rustc_errors::emitter::HumanReadableErrorType;
 use rustc_errors::{ColorConfig, registry};
+use rustc_hir::attrs::NativeLibKind;
 use rustc_session::config::{
     AutoDiff, BranchProtection, CFGuard, Cfg, CollapseMacroDebuginfo, CoverageLevel,
     CoverageOptions, DebugInfo, DumpMonoStatsFormat, ErrorOutputType, ExternEntry, ExternLocation,
@@ -20,7 +21,7 @@ use rustc_session::config::{
 };
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
-use rustc_session::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
+use rustc_session::utils::{CanonicalizedPath, NativeLib};
 use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, build_session, getopts};
 use rustc_span::edition::{DEFAULT_EDITION, Edition};
 use rustc_span::source_map::{RealFileLoader, SourceMapInputs};
@@ -807,6 +808,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(hint_mostly_unused, true);
     tracked!(human_readable_cgu_names, true);
     tracked!(incremental_ignore_spans, true);
+    tracked!(indirect_branch_cs_prefix, true);
     tracked!(inline_mir, Some(true));
     tracked!(inline_mir_hint_threshold, Some(123));
     tracked!(inline_mir_threshold, Some(123));

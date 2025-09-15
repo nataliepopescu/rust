@@ -31,7 +31,7 @@ codegen_ssa_cpu_required = target requires explicitly specifying a cpu with `-C 
 codegen_ssa_create_temp_dir = couldn't create a temp dir: {$error}
 
 codegen_ssa_dlltool_fail_import_library =
-    Dlltool could not create import library with {$dlltool_path} {$dlltool_args}:
+    dlltool could not create import library with {$dlltool_path} {$dlltool_args}:
     {$stdout}
     {$stderr}
 
@@ -40,15 +40,15 @@ codegen_ssa_dynamic_linking_with_lto =
     .note = only 'staticlib', 'bin', and 'cdylib' outputs are supported with LTO
 
 codegen_ssa_error_calling_dlltool =
-    Error calling dlltool '{$dlltool_path}': {$error}
+    error calling dlltool '{$dlltool_path}': {$error}
 
 codegen_ssa_error_creating_import_library =
-    Error creating import library for {$lib_name}: {$error}
+    error creating import library for {$lib_name}: {$error}
 
 codegen_ssa_error_creating_remark_dir = failed to create remark directory: {$error}
 
 codegen_ssa_error_writing_def_file =
-    Error writing .DEF file: {$error}
+    error writing .DEF file: {$error}
 
 codegen_ssa_expected_name_value_pair = expected name value pair
 
@@ -171,9 +171,6 @@ codegen_ssa_invalid_monomorphization_unsupported_symbol = invalid monomorphizati
 
 codegen_ssa_invalid_monomorphization_unsupported_symbol_of_size = invalid monomorphization of `{$name}` intrinsic: unsupported {$symbol} from `{$in_ty}` with element `{$in_elem}` of size `{$size}` to `{$ret_ty}`
 
-codegen_ssa_invalid_no_sanitize = invalid argument for `no_sanitize`
-    .note = expected one of: `address`, `cfi`, `hwaddress`, `kcfi`, `memory`, `memtag`, `shadow-call-stack`, or `thread`
-
 codegen_ssa_invalid_windows_subsystem = invalid windows subsystem `{$subsystem}`, only `windows` and `console` are allowed
 
 codegen_ssa_ld64_unimplemented_modifier = `as-needed` modifier not implemented yet for ld64
@@ -267,9 +264,9 @@ codegen_ssa_shuffle_indices_evaluation = could not evaluate shuffle_indices at c
 
 codegen_ssa_specify_libraries_to_link = use the `-l` flag to specify native libraries to link
 
-codegen_ssa_static_library_native_artifacts = Link against the following native artifacts when linking against this static library. The order and any duplication can be significant on some platforms.
+codegen_ssa_static_library_native_artifacts = link against the following native artifacts when linking against this static library. The order and any duplication can be significant on some platforms.
 
-codegen_ssa_static_library_native_artifacts_to_file = Native artifacts to link against have been written to {$path}. The order and any duplication can be significant on some platforms.
+codegen_ssa_static_library_native_artifacts_to_file = native artifacts to link against have been written to {$path}. The order and any duplication can be significant on some platforms.
 
 codegen_ssa_stripping_debug_info_failed = stripping debug info with `{$util}` failed: {$status}
     .note = {$output}
@@ -367,13 +364,13 @@ codegen_ssa_unable_to_run = unable to run `{$util}`: {$error}
 
 codegen_ssa_unable_to_run_dsymutil = unable to run `dsymutil`: {$error}
 
-codegen_ssa_unable_to_write_debugger_visualizer = Unable to write debugger visualizer file `{$path}`: {$error}
+codegen_ssa_unable_to_write_debugger_visualizer = unable to write debugger visualizer file `{$path}`: {$error}
 
 codegen_ssa_unexpected_parameter_name = unexpected parameter name
     .label = expected `{$prefix_nops}` or `{$entry_nops}`
 
 codegen_ssa_unknown_archive_kind =
-    Don't know how to build archive of type: {$kind}
+    don't know how to build archive of type: {$kind}
 
 codegen_ssa_unknown_ctarget_feature =
     unknown and unstable feature specified for `-Ctarget-feature`: `{$feature}`

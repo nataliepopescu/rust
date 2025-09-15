@@ -18,6 +18,7 @@ use rustc_lint::LateContext;
 use rustc_middle::mir::ConstValue;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::traits::EvaluationResult;
+use rustc_middle::ty::adjustment::{Adjust, Adjustment};
 use rustc_middle::ty::layout::ValidityRequirement;
 use rustc_middle::ty::{
     self, AdtDef, AliasTy, AssocItem, AssocTag, Binder, BoundRegion, FnSig, GenericArg, GenericArgKind, GenericArgsRef,
@@ -31,7 +32,7 @@ use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
 use rustc_trait_selection::traits::{Obligation, ObligationCause};
 use std::assert_matches::debug_assert_matches;
 use std::collections::hash_map::Entry;
-use std::iter;
+use std::{iter, mem};
 
 use crate::path_res;
 use crate::paths::{PathNS, lookup_path_str};
@@ -284,7 +285,7 @@ pub fn implements_trait_with_env_from_iter<'tcx>(
         let _ = tcx.hir_body_owner_kind(callee_id);
     }
 
-    let ty = tcx.erase_regions(ty);
+    let ty = tcx.erase_and_anonymize_regions(ty);
     if ty.has_escaping_bound_vars() {
         return false;
     }
@@ -386,10 +387,7 @@ pub fn is_recursively_primitive_type(ty: Ty<'_>) -> bool {
 /// Checks if the type is a reference equals to a diagnostic item
 pub fn is_type_ref_to_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_item: Symbol) -> bool {
     match ty.kind() {
-        ty::Ref(_, ref_ty, _) => match ref_ty.kind() {
-            ty::Adt(adt, _) => cx.tcx.is_diagnostic_item(diag_item, adt.did()),
-            _ => false,
-        },
+        ty::Ref(_, ref_ty, _) => is_type_diagnostic_item(cx, *ref_ty, diag_item),
         _ => false,
     }
 }
@@ -1377,12 +1375,9 @@ pub fn has_non_owning_mutable_access<'tcx>(cx: &LateContext<'tcx>, iter_ty: Ty<'
 
 /// Check if `ty` is slice-like, i.e., `&[T]`, `[T; N]`, or `Vec<T>`.
 pub fn is_slice_like<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
-    ty.is_slice()
-        || ty.is_array()
-        || matches!(ty.kind(), ty::Adt(adt_def, _) if cx.tcx.is_diagnostic_item(sym::Vec, adt_def.did()))
+    ty.is_slice() || ty.is_array() || is_type_diagnostic_item(cx, ty, sym::Vec)
 }
 
-/// Gets the index of a field by name.
 pub fn get_field_idx_by_name(ty: Ty<'_>, name: Symbol) -> Option<usize> {
     match *ty.kind() {
         ty::Adt(def, _) if def.is_union() || def.is_struct() => {
@@ -1391,4 +1386,12 @@ pub fn get_field_idx_by_name(ty: Ty<'_>, name: Symbol) -> Option<usize> {
         ty::Tuple(_) => name.as_str().parse::<usize>().ok(),
         _ => None,
     }
+}
+
+/// Checks if the adjustments contain a mutable dereference of a `ManuallyDrop<_>`.
+pub fn adjust_derefs_manually_drop<'tcx>(adjustments: &'tcx [Adjustment<'tcx>], mut ty: Ty<'tcx>) -> bool {
+    adjustments.iter().any(|a| {
+        let ty = mem::replace(&mut ty, a.target);
+        matches!(a.kind, Adjust::Deref(Some(op)) if op.mutbl == Mutability::Mut) && is_manually_drop(ty)
+    })
 }

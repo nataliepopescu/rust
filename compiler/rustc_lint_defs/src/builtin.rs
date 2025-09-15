@@ -2301,18 +2301,18 @@ declare_lint! {
 
 declare_lint! {
     /// The `inline_no_sanitize` lint detects incompatible use of
-    /// [`#[inline(always)]`][inline] and [`#[no_sanitize(...)]`][no_sanitize].
+    /// [`#[inline(always)]`][inline] and [`#[sanitize(xyz = "off")]`][sanitize].
     ///
     /// [inline]: https://doc.rust-lang.org/reference/attributes/codegen.html#the-inline-attribute
-    /// [no_sanitize]: https://doc.rust-lang.org/nightly/unstable-book/language-features/no-sanitize.html
+    /// [sanitize]: https://doc.rust-lang.org/nightly/unstable-book/language-features/no-sanitize.html
     ///
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(no_sanitize)]
+    /// #![cfg_attr(not(bootstrap), feature(sanitize))]
     ///
     /// #[inline(always)]
-    /// #[no_sanitize(address)]
+    /// #[cfg_attr(not(bootstrap), sanitize(address = "off"))]
     /// fn x() {}
     ///
     /// fn main() {
@@ -2325,11 +2325,11 @@ declare_lint! {
     /// ### Explanation
     ///
     /// The use of the [`#[inline(always)]`][inline] attribute prevents the
-    /// the [`#[no_sanitize(...)]`][no_sanitize] attribute from working.
+    /// the [`#[sanitize(xyz = "off")]`][sanitize] attribute from working.
     /// Consider temporarily removing `inline` attribute.
     pub INLINE_NO_SANITIZE,
     Warn,
-    "detects incompatible use of `#[inline(always)]` and `#[no_sanitize(...)]`",
+    r#"detects incompatible use of `#[inline(always)]` and `#[sanitize(... = "off")]`"#,
 }
 
 declare_lint! {
@@ -4832,13 +4832,16 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust,compile_fail
+    #[cfg_attr(not(bootstrap), doc = "```rust,compile_fail")]
+    #[cfg_attr(bootstrap, doc = "```rust")]
     /// #![doc = in_root!()]
     ///
     /// macro_rules! in_root { () => { "" } }
     ///
     /// fn main() {}
-    /// ```
+    #[cfg_attr(not(bootstrap), doc = "```")]
+    #[cfg_attr(bootstrap, doc = "```")]
+    // ^ Needed to avoid tidy warning about odd number of backticks
     ///
     /// {{produces}}
     ///
@@ -5137,4 +5140,58 @@ declare_lint! {
     Warn,
     "detects tail calls of functions marked with `#[track_caller]`",
     @feature_gate = explicit_tail_calls;
+}
+declare_lint! {
+    /// The `inline_always_mismatching_target_features` lint will trigger when a
+    /// function with the `#[inline(always)]` and `#[target_feature(enable = "...")]`
+    /// attributes is called and cannot be inlined due to missing target features in the caller.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (fails on x86_64)
+    /// #[inline(always)]
+    /// #[target_feature(enable = "fp16")]
+    /// unsafe fn callee() {
+    ///     // operations using fp16 types
+    /// }
+    ///
+    /// // Caller does not enable the required target feature
+    /// fn caller() {
+    ///     unsafe { callee(); }
+    /// }
+    ///
+    /// fn main() {
+    ///     caller();
+    /// }
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// warning: call to `#[inline(always)]`-annotated `callee` requires the same target features. Function will not have `alwaysinline` attribute applied
+    ///   --> $DIR/builtin.rs:5192:14
+    ///    |
+    /// 10 |     unsafe { callee(); }
+    ///    |              ^^^^^^^^
+    ///    |
+    /// note: `fp16` target feature enabled in `callee` here but missing from `caller`
+    ///   --> $DIR/builtin.rs:5185:1
+    ///    |
+    /// 3  | #[target_feature(enable = "fp16")]
+    ///    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    /// 4  | unsafe fn callee() {
+    ///    | ------------------
+    ///    = note: `#[warn(inline_always_mismatching_target_features)]` on by default
+    /// warning: 1 warning emitted
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// Inlining a function with a target feature attribute into a caller that
+    /// lacks the corresponding target feature can lead to unsound behavior.
+    /// LLVM may select the wrong instructions or registers, or reorder
+    /// operations, potentially resulting in runtime errors.
+    pub INLINE_ALWAYS_MISMATCHING_TARGET_FEATURES,
+    Warn,
+    r#"detects when a function annotated with `#[inline(always)]` and `#[target_feature(enable = "..")]` is inlined into a caller without the required target feature"#,
 }

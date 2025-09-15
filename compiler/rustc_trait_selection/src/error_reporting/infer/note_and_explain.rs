@@ -537,7 +537,7 @@ impl<T> Trait<T> for X {
                 }
             }
             TypeError::TargetFeatureCast(def_id) => {
-                let target_spans = find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TargetFeature(.., span) => *span);
+                let target_spans = find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TargetFeature{attr_span: span, was_forced: false, ..} => *span);
                 diag.note(
                     "functions with `#[target_feature]` can only be coerced to `unsafe` function pointers"
                 );
@@ -629,7 +629,11 @@ impl<T> Trait<T> for X {
         let tcx = self.tcx;
 
         // Don't suggest constraining a projection to something containing itself
-        if self.tcx.erase_regions(values.found).contains(self.tcx.erase_regions(values.expected)) {
+        if self
+            .tcx
+            .erase_and_anonymize_regions(values.found)
+            .contains(self.tcx.erase_and_anonymize_regions(values.expected))
+        {
             return;
         }
 
@@ -853,11 +857,11 @@ fn foo(&self) -> Self::T { String::new() }
                     && self.infcx.can_eq(param_env, assoc_ty, found)
                 {
                     let msg = match assoc_item.container {
-                        ty::AssocItemContainer::Trait => {
+                        ty::AssocContainer::Trait => {
                             "associated type defaults can't be assumed inside the \
                                             trait defining them"
                         }
-                        ty::AssocItemContainer::Impl => {
+                        ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => {
                             "associated type is `default` and may be overridden"
                         }
                     };

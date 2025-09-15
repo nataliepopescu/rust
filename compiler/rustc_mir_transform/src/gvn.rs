@@ -87,6 +87,7 @@
 use std::borrow::Cow;
 
 use either::Either;
+use itertools::Itertools as _;
 use rustc_abi::{self as abi, BackendRepr, FIRST_VARIANT, FieldIdx, Primitive, Size, VariantIdx};
 use rustc_const_eval::const_eval::DummyMachine;
 use rustc_const_eval::interpret::{
@@ -447,26 +448,9 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
 
             Projection(base, elem) => {
                 let base = self.evaluated[base].as_ref()?;
-                let elem = match elem {
-                    ProjectionElem::Deref => ProjectionElem::Deref,
-                    ProjectionElem::Downcast(name, read_variant) => {
-                        ProjectionElem::Downcast(name, read_variant)
-                    }
-                    ProjectionElem::Field(f, ()) => ProjectionElem::Field(f, ty.ty),
-                    ProjectionElem::ConstantIndex { offset, min_length, from_end } => {
-                        ProjectionElem::ConstantIndex { offset, min_length, from_end }
-                    }
-                    ProjectionElem::Subslice { from, to, from_end } => {
-                        ProjectionElem::Subslice { from, to, from_end }
-                    }
-                    ProjectionElem::OpaqueCast(()) => ProjectionElem::OpaqueCast(ty.ty),
-                    ProjectionElem::Subtype(()) => ProjectionElem::Subtype(ty.ty),
-                    ProjectionElem::UnwrapUnsafeBinder(()) => {
-                        ProjectionElem::UnwrapUnsafeBinder(ty.ty)
-                    }
-                    // This should have been replaced by a `ConstantIndex` earlier.
-                    ProjectionElem::Index(_) => return None,
-                };
+                // `Index` by constants should have been replaced by `ConstantIndex` by
+                // `simplify_place_projection`.
+                let elem = elem.try_map(|_| None, |()| ty.ty)?;
                 self.ecx.project(base, elem).discard_err()?
             }
             Address { place, kind: _, provenance: _ } => {
@@ -476,13 +460,11 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let local = self.locals[place.local]?;
                 let pointer = self.evaluated[local].as_ref()?;
                 let mut mplace = self.ecx.deref_pointer(pointer).discard_err()?;
-                for proj in place.projection.iter().skip(1) {
-                    // We have no call stack to associate a local with a value, so we cannot
-                    // interpret indexing.
-                    if matches!(proj, ProjectionElem::Index(_)) {
-                        return None;
-                    }
-                    mplace = self.ecx.project(&mplace, proj).discard_err()?;
+                for elem in place.projection.iter().skip(1) {
+                    // `Index` by constants should have been replaced by `ConstantIndex` by
+                    // `simplify_place_projection`.
+                    let elem = elem.try_map(|_| None, |ty| ty)?;
+                    mplace = self.ecx.project(&mplace, elem).discard_err()?;
                 }
                 let pointer = mplace.to_ref(&self.ecx);
                 ImmTy::from_immediate(pointer, ty).into()
@@ -902,43 +884,25 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         proj: ProjectionElem<VnIndex, ()>,
         loc: Location,
     ) -> Option<PlaceElem<'tcx>> {
-        Some(match proj {
-            ProjectionElem::Deref => ProjectionElem::Deref,
-            ProjectionElem::Field(idx, ()) => ProjectionElem::Field(idx, ty),
-            ProjectionElem::Index(idx) => {
-                let Some(local) = self.try_as_local(idx, loc) else {
-                    return None;
-                };
+        proj.try_map(
+            |value| {
+                let local = self.try_as_local(value, loc)?;
                 self.reused_locals.insert(local);
-                ProjectionElem::Index(local)
-            }
-            ProjectionElem::ConstantIndex { offset, min_length, from_end } => {
-                ProjectionElem::ConstantIndex { offset, min_length, from_end }
-            }
-            ProjectionElem::Subslice { from, to, from_end } => {
-                ProjectionElem::Subslice { from, to, from_end }
-            }
-            ProjectionElem::Downcast(symbol, idx) => ProjectionElem::Downcast(symbol, idx),
-            ProjectionElem::OpaqueCast(()) => ProjectionElem::OpaqueCast(ty),
-            ProjectionElem::Subtype(()) => ProjectionElem::Subtype(ty),
-            ProjectionElem::UnwrapUnsafeBinder(()) => ProjectionElem::UnwrapUnsafeBinder(ty),
-        })
+                Some(local)
+            },
+            |()| ty,
+        )
     }
 
     fn simplify_aggregate_to_copy(
         &mut self,
-        lhs: &Place<'tcx>,
-        rvalue: &mut Rvalue<'tcx>,
-        location: Location,
-        fields: &[VnIndex],
+        ty: Ty<'tcx>,
         variant_index: VariantIdx,
+        fields: &[VnIndex],
     ) -> Option<VnIndex> {
-        let Some(&first_field) = fields.first() else {
-            return None;
-        };
-        let Value::Projection(copy_from_value, _) = *self.get(first_field) else {
-            return None;
-        };
+        let Some(&first_field) = fields.first() else { return None };
+        let Value::Projection(copy_from_value, _) = *self.get(first_field) else { return None };
+
         // All fields must correspond one-to-one and come from the same aggregate value.
         if fields.iter().enumerate().any(|(index, &v)| {
             if let Value::Projection(pointer, ProjectionElem::Field(from_index, _)) = *self.get(v)
@@ -965,21 +929,8 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             }
         }
 
-        // Allow introducing places with non-constant offsets, as those are still better than
-        // reconstructing an aggregate.
-        if self.ty(copy_from_local_value) == rvalue.ty(self.local_decls, self.tcx)
-            && let Some(place) = self.try_as_place(copy_from_local_value, location, true)
-        {
-            // Avoid creating `*a = copy (*b)`, as they might be aliases resulting in overlapping assignments.
-            // FIXME: This also avoids any kind of projection, not just derefs. We can add allowed projections.
-            if lhs.as_local().is_some() {
-                self.reused_locals.insert(place.local);
-                *rvalue = Rvalue::Use(Operand::Copy(place));
-            }
-            return Some(copy_from_local_value);
-        }
-
-        None
+        // Both must be variants of the same type.
+        if self.ty(copy_from_local_value) == ty { Some(copy_from_local_value) } else { None }
     }
 
     fn simplify_aggregate(
@@ -1055,20 +1006,27 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             }
         };
 
-        if ty.is_array() && fields.len() > 4 {
-            let first = fields[0];
-            if fields.iter().all(|&v| v == first) {
-                let len = ty::Const::from_target_usize(self.tcx, fields.len().try_into().unwrap());
-                if let Some(op) = self.try_as_operand(first, location) {
-                    *rvalue = Rvalue::Repeat(op, len);
-                }
-                return Some(self.insert(ty, Value::Repeat(first, len)));
+        if ty.is_array()
+            && fields.len() > 4
+            && let Ok(&first) = fields.iter().all_equal_value()
+        {
+            let len = ty::Const::from_target_usize(self.tcx, fields.len().try_into().unwrap());
+            if let Some(op) = self.try_as_operand(first, location) {
+                *rvalue = Rvalue::Repeat(op, len);
             }
+            return Some(self.insert(ty, Value::Repeat(first, len)));
         }
 
-        if let Some(value) =
-            self.simplify_aggregate_to_copy(lhs, rvalue, location, &fields, variant_index)
-        {
+        if let Some(value) = self.simplify_aggregate_to_copy(ty, variant_index, &fields) {
+            // Allow introducing places with non-constant offsets, as those are still better than
+            // reconstructing an aggregate. But avoid creating `*a = copy (*b)`, as they might be
+            // aliases resulting in overlapping assignments.
+            let allow_complex_projection =
+                lhs.projection[..].iter().all(PlaceElem::is_stable_offset);
+            if let Some(place) = self.try_as_place(value, location, allow_complex_projection) {
+                self.reused_locals.insert(place.local);
+                *rvalue = Rvalue::Use(Operand::Copy(place));
+            }
             return Some(value);
         }
 
@@ -1686,6 +1644,11 @@ impl<'tcx> VnState<'_, 'tcx> {
                 let place =
                     Place { local, projection: self.tcx.mk_place_elems(projection.as_slice()) };
                 return Some(place);
+            } else if projection.last() == Some(&PlaceElem::Deref) {
+                // `Deref` can only be the first projection in a place.
+                // If we are here, we failed to find a local, and we already have a `Deref`.
+                // Trying to add projections will only result in an ill-formed place.
+                return None;
             } else if let Value::Projection(pointer, proj) = *self.get(index)
                 && (allow_complex_projection || proj.is_stable_offset())
                 && let Some(proj) = self.try_as_place_elem(self.ty(index), proj, loc)

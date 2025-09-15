@@ -54,7 +54,7 @@ pub(super) fn mangle<'tcx>(
 
     // Erase regions because they may not be deterministic when hashed
     // and should not matter anyhow.
-    let instance_ty = tcx.erase_regions(instance_ty);
+    let instance_ty = tcx.erase_and_anonymize_regions(instance_ty);
 
     let hash = get_symbol_hash(tcx, instance, instance_ty, instantiating_crate);
 
@@ -235,7 +235,8 @@ impl<'tcx> Printer<'tcx> for LegacySymbolMangler<'tcx> {
 
     fn print_region(&mut self, _region: ty::Region<'_>) -> Result<(), PrintError> {
         // This might be reachable (via `pretty_print_dyn_existential`) even though
-        // `<Self As PrettyPrinter>::should_print_region` returns false. See #144994.
+        // `<Self As PrettyPrinter>::should_print_optional_region` returns false and
+        // `print_path_with_generic_args` filters out lifetimes. See #144994.
         Ok(())
     }
 
@@ -389,7 +390,6 @@ impl<'tcx> Printer<'tcx> for LegacySymbolMangler<'tcx> {
 
         let args =
             args.iter().cloned().filter(|arg| !matches!(arg.kind(), GenericArgKind::Lifetime(_)));
-
         if args.clone().next().is_some() {
             self.generic_delimiters(|cx| cx.comma_sep(args))
         } else {
@@ -422,7 +422,10 @@ impl<'tcx> Printer<'tcx> for LegacySymbolMangler<'tcx> {
             || &args[..generics.count()]
                 == self
                     .tcx
-                    .erase_regions(ty::GenericArgs::identity_for_item(self.tcx, impl_def_id))
+                    .erase_and_anonymize_regions(ty::GenericArgs::identity_for_item(
+                        self.tcx,
+                        impl_def_id,
+                    ))
                     .as_slice()
         {
             (
@@ -459,7 +462,7 @@ impl<'tcx> Printer<'tcx> for LegacySymbolMangler<'tcx> {
 }
 
 impl<'tcx> PrettyPrinter<'tcx> for LegacySymbolMangler<'tcx> {
-    fn should_print_region(&self, _region: ty::Region<'_>) -> bool {
+    fn should_print_optional_region(&self, _region: ty::Region<'_>) -> bool {
         false
     }
 

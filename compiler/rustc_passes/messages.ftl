@@ -74,6 +74,16 @@ passes_const_stable_not_stable =
     attribute `#[rustc_const_stable]` can only be applied to functions that are declared `#[stable]`
     .label = attribute specified here
 
+passes_custom_mir_incompatible_dialect_and_phase =
+    the {$dialect} dialect is not compatible with the {$phase} phase
+    .dialect_span = this dialect...
+    .phase_span = ... is not compatible with this phase
+
+passes_custom_mir_phase_requires_dialect =
+    `dialect` key required
+    .phase_span = `phase` argument requires a `dialect` argument
+
+
 passes_dead_codes =
     { $multiple ->
       *[true] multiple {$descr}s are
@@ -135,6 +145,10 @@ passes_doc_alias_start_end =
 passes_doc_attr_not_crate_level =
     `#![doc({$attr_name} = "...")]` isn't allowed as a crate-level attribute
 
+passes_doc_attribute_not_attribute =
+    nonexistent builtin attribute `{$attribute}` used in `#[doc(attribute = "...")]`
+    .help = only existing builtin attributes are allowed in core/std
+
 passes_doc_cfg_hide_takes_list =
     `#[doc(cfg_hide(...))]` takes a list of attributes
 
@@ -163,15 +177,15 @@ passes_doc_inline_only_use =
 passes_doc_invalid =
     invalid `doc` attribute
 
-passes_doc_keyword_empty_mod =
-    `#[doc(keyword = "...")]` should be used on empty modules
+passes_doc_keyword_attribute_empty_mod =
+    `#[doc({$attr_name} = "...")]` should be used on empty modules
+
+passes_doc_keyword_attribute_not_mod =
+    `#[doc({$attr_name} = "...")]` should be used on modules
 
 passes_doc_keyword_not_keyword =
     nonexistent keyword `{$keyword}` used in `#[doc(keyword = "...")]`
     .help = only existing keywords are allowed in core/std
-
-passes_doc_keyword_not_mod =
-    `#[doc(keyword = "...")]` should be used on modules
 
 passes_doc_keyword_only_impl =
     `#[doc(keyword = "...")]` should be used on impl blocks
@@ -422,10 +436,6 @@ passes_must_not_suspend =
     `must_not_suspend` attribute should be applied to a struct, enum, union, or trait
     .label = is not a struct, enum, union, or trait
 
-passes_must_use_no_effect =
-    `#[must_use]` has no effect when applied to {$target}
-    .suggestion = remove the attribute
-
 passes_no_link =
     attribute should be applied to an `extern crate` item
     .label = not an `extern crate` item
@@ -444,10 +454,6 @@ passes_no_main_function =
     .teach_note = If you don't know the basics of Rust, you can go look to the Rust Book to get started: https://doc.rust-lang.org/book/
     .non_function_main = non-function item at `crate::main` is found
 
-passes_no_sanitize =
-    `#[no_sanitize({$attr_str})]` should be applied to {$accepted_kind}
-    .label = not {$accepted_kind}
-
 passes_non_exhaustive_with_default_field_values =
     `#[non_exhaustive]` can't be used to annotate items with default field values
     .label = this struct has default field values
@@ -460,8 +466,10 @@ passes_object_lifetime_err =
     {$repr}
 
 passes_outer_crate_level_attr =
-    crate-level attribute should be an inner attribute: add an exclamation mark: `#![foo]`
+    crate-level attribute should be an inner attribute
 
+passes_outer_crate_level_attr_suggestion =
+    add a `!`
 
 passes_panic_unwind_without_std =
     unwinding panics are not supported without std
@@ -492,6 +500,10 @@ passes_repr_align_greater_than_target_max =
 passes_repr_align_should_be_align =
     `#[repr(align(...))]` is not supported on {$item}
     .help = use `#[rustc_align(...)]` instead
+
+passes_repr_align_should_be_align_static =
+    `#[repr(align(...))]` is not supported on {$item}
+    .help = use `#[rustc_align_static(...)]` instead
 
 passes_repr_conflicting =
     conflicting representation hints
@@ -541,6 +553,12 @@ passes_rustc_lint_opt_ty =
 passes_rustc_pub_transparent =
     attribute should be applied to `#[repr(transparent)]` types
     .label = not a `#[repr(transparent)]` type
+
+passes_sanitize_attribute_not_allowed =
+    sanitize attribute not allowed here
+    .not_fn_impl_mod = not a function, impl block, or module
+    .no_body = function has no body
+    .help = sanitize attribute can be applied to a function (with body), impl block, or module
 
 passes_should_be_applied_to_fn =
     attribute should be applied to a function definition
@@ -673,6 +691,7 @@ passes_unused_var_maybe_capture_ref = unused variable: `{$name}`
 
 passes_unused_var_remove_field = unused variable: `{$name}`
 passes_unused_var_remove_field_suggestion = try removing the field
+passes_unused_var_typo = you might have meant to pattern match on the similarly named {$kind} `{$item_name}`
 
 passes_unused_variable_args_in_macro = `{$name}` is captured in macro and introduced a unused variable
 

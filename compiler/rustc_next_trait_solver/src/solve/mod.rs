@@ -24,10 +24,13 @@ mod trait_goals;
 use derive_where::derive_where;
 use rustc_type_ir::inherent::*;
 pub use rustc_type_ir::solve::*;
-use rustc_type_ir::{self as ty, Interner, TypingMode};
+use rustc_type_ir::{self as ty, Interner, TyVid, TypingMode};
 use tracing::instrument;
 
-pub use self::eval_ctxt::{EvalCtxt, GenerateProofTree, SolverDelegateEvalExt};
+pub use self::eval_ctxt::{
+    EvalCtxt, GenerateProofTree, SolverDelegateEvalExt,
+    evaluate_root_goal_for_proof_tree_raw_provider,
+};
 use crate::delegate::SolverDelegate;
 use crate::solve::assembly::Candidate;
 
@@ -41,12 +44,6 @@ use crate::solve::assembly::Candidate;
 /// is required, we can add a new attribute for that or revert this to be dependant on the
 /// recursion limit again. However, this feels very unlikely.
 const FIXPOINT_STEP_LIMIT: usize = 8;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum GoalEvaluationKind {
-    Root,
-    Nested,
-}
 
 /// Whether evaluating this goal ended up changing the
 /// inference state.
@@ -122,15 +119,19 @@ where
 
     #[instrument(level = "trace", skip(self))]
     fn compute_subtype_goal(&mut self, goal: Goal<I, ty::SubtypePredicate<I>>) -> QueryResult<I> {
-        if goal.predicate.a.is_ty_var() && goal.predicate.b.is_ty_var() {
-            self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
-        } else {
-            self.sub(goal.param_env, goal.predicate.a, goal.predicate.b)?;
-            self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        match (goal.predicate.a.kind(), goal.predicate.b.kind()) {
+            (ty::Infer(ty::TyVar(a_vid)), ty::Infer(ty::TyVar(b_vid))) => {
+                self.sub_unify_ty_vids_raw(a_vid, b_vid);
+                self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
+            }
+            _ => {
+                self.sub(goal.param_env, goal.predicate.a, goal.predicate.b)?;
+                self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+            }
         }
     }
 
-    fn compute_dyn_compatible_goal(&mut self, trait_def_id: I::DefId) -> QueryResult<I> {
+    fn compute_dyn_compatible_goal(&mut self, trait_def_id: I::TraitId) -> QueryResult<I> {
         if self.cx().trait_is_dyn_compatible(trait_def_id) {
             self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
         } else {
@@ -425,6 +426,7 @@ pub struct GoalEvaluation<I: Interner> {
 pub struct GoalStalledOn<I: Interner> {
     pub num_opaques: usize,
     pub stalled_vars: Vec<I::GenericArg>,
+    pub sub_roots: Vec<TyVid>,
     /// The cause that will be returned on subsequent evaluations if this goal remains stalled.
     pub stalled_cause: MaybeCause,
 }

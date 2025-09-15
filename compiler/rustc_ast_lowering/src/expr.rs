@@ -1434,10 +1434,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         self.dcx().emit_err(FunctionalRecordUpdateDestructuringAssignment {
                             span: e.span,
                         });
-                        true
+                        Some(self.lower_span(e.span))
                     }
-                    StructRest::Rest(_) => true,
-                    StructRest::None => false,
+                    StructRest::Rest(span) => Some(self.lower_span(*span)),
+                    StructRest::None => None,
                 };
                 let struct_pat = hir::PatKind::Struct(qpath, field_pats, fields_omitted);
                 return self.pat_without_dbm(lhs.span, struct_pat);
@@ -1536,7 +1536,13 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     hir::LangItem::Range
                 }
             }
-            (None, Some(..), Closed) => hir::LangItem::RangeToInclusive,
+            (None, Some(..), Closed) => {
+                if self.tcx.features().new_range() {
+                    hir::LangItem::RangeToInclusiveCopy
+                } else {
+                    hir::LangItem::RangeToInclusive
+                }
+            }
             (Some(e1), Some(e2), Closed) => {
                 if self.tcx.features().new_range() {
                     hir::LangItem::RangeInclusiveCopy
@@ -1560,13 +1566,26 @@ impl<'hir> LoweringContext<'_, 'hir> {
         };
 
         let fields = self.arena.alloc_from_iter(
-            e1.iter().map(|e| (sym::start, e)).chain(e2.iter().map(|e| (sym::end, e))).map(
-                |(s, e)| {
+            e1.iter()
+                .map(|e| (sym::start, e))
+                .chain(e2.iter().map(|e| {
+                    (
+                        if matches!(
+                            lang_item,
+                            hir::LangItem::RangeInclusiveCopy | hir::LangItem::RangeToInclusiveCopy
+                        ) {
+                            sym::last
+                        } else {
+                            sym::end
+                        },
+                        e,
+                    )
+                }))
+                .map(|(s, e)| {
                     let expr = self.lower_expr(e);
                     let ident = Ident::new(s, self.lower_span(e.span));
                     self.expr_field(ident, expr, e.span)
-                },
-            ),
+                }),
         );
 
         hir::ExprKind::Struct(

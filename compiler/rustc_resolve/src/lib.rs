@@ -32,7 +32,7 @@ use std::sync::Arc;
 use diagnostics::{ImportSuggestion, LabelSuggestion, Suggestion};
 use effective_visibilities::EffectiveVisibilitiesVisitor;
 use errors::{ParamKindInEnumDiscriminant, ParamKindInNonTrivialAnonConst};
-use imports::{Import, ImportData, ImportKind, NameResolution};
+use imports::{Import, ImportData, ImportKind, NameResolution, PendingBinding};
 use late::{
     ForwardGenericParamBanReason, HasGenericParams, PathSource, PatternSource,
     UnnecessaryQualification,
@@ -49,7 +49,7 @@ use rustc_data_structures::intern::Interned;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{FreezeReadGuard, FreezeWriteGuard};
 use rustc_data_structures::unord::{UnordMap, UnordSet};
-use rustc_errors::{Applicability, Diag, ErrCode, ErrorGuaranteed};
+use rustc_errors::{Applicability, Diag, ErrCode, ErrorGuaranteed, LintBuffer};
 use rustc_expand::base::{DeriveResolution, SyntaxExtension, SyntaxExtensionKind};
 use rustc_feature::BUILTIN_ATTRIBUTES;
 use rustc_hir::attrs::StrippedCfgItem;
@@ -72,8 +72,8 @@ use rustc_middle::ty::{
     ResolverGlobalCtxt, TyCtxt, TyCtxtFeed, Visibility,
 };
 use rustc_query_system::ich::StableHashingContext;
+use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::PRIVATE_MACRO_USE;
-use rustc_session::lint::{BuiltinLintDiag, LintBuffer};
 use rustc_span::hygiene::{ExpnId, LocalExpnId, MacroKind, SyntaxContext, Transparency};
 use rustc_span::{DUMMY_SP, Ident, Macros20NormalizedIdent, Span, Symbol, kw, sym};
 use smallvec::{SmallVec, smallvec};
@@ -156,11 +156,8 @@ enum ScopeSet<'ra> {
     ModuleAndExternPrelude(Namespace, Module<'ra>),
     /// Just two extern prelude scopes.
     ExternPrelude,
-    /// All scopes with macro namespace and the given macro kind restriction.
+    /// Same as `All(MacroNS)`, but with the given macro kind restriction.
     Macro(MacroKind),
-    /// All scopes with the given namespace, used for partially performing late resolution.
-    /// The node id enables lints and is used for reporting them.
-    Late(Namespace, Module<'ra>, Option<NodeId>),
 }
 
 /// Everything you need to know about a name's location to resolve it.
@@ -233,8 +230,8 @@ enum Used {
 #[derive(Debug)]
 struct BindingError {
     name: Ident,
-    origin: BTreeSet<Span>,
-    target: BTreeSet<Span>,
+    origin: Vec<(Span, ast::Pat)>,
+    target: Vec<ast::Pat>,
     could_be_path: bool,
 }
 
@@ -781,7 +778,10 @@ impl<'ra> std::ops::Deref for Module<'ra> {
 
 impl<'ra> fmt::Debug for Module<'ra> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.res())
+        match self.kind {
+            ModuleKind::Block => write!(f, "block"),
+            ModuleKind::Def(..) => write!(f, "{:?}", self.res()),
+        }
     }
 }
 
@@ -1025,18 +1025,26 @@ impl<'ra> NameBindingData<'ra> {
     }
 }
 
-#[derive(Default, Clone)]
 struct ExternPreludeEntry<'ra> {
     /// Binding from an `extern crate` item.
-    item_binding: Option<NameBinding<'ra>>,
+    /// The boolean flag is true is `item_binding` is non-redundant, happens either when
+    /// `flag_binding` is `None`, or when `extern crate` introducing `item_binding` used renaming.
+    item_binding: Option<(NameBinding<'ra>, /* introduced by item */ bool)>,
     /// Binding from an `--extern` flag, lazily populated on first use.
-    flag_binding: Cell<Option<NameBinding<'ra>>>,
-    /// There was no `--extern` flag introducing this name,
-    /// `flag_binding` doesn't need to be populated.
-    only_item: bool,
-    /// `item_binding` is non-redundant, happens either when `only_item` is true,
-    /// or when `extern crate` introducing `item_binding` used renaming.
-    introduced_by_item: bool,
+    flag_binding: Option<Cell<(PendingBinding<'ra>, /* finalized */ bool)>>,
+}
+
+impl ExternPreludeEntry<'_> {
+    fn introduced_by_item(&self) -> bool {
+        matches!(self.item_binding, Some((_, true)))
+    }
+
+    fn flag() -> Self {
+        ExternPreludeEntry {
+            item_binding: None,
+            flag_binding: Some(Cell::new((PendingBinding::Pending, false))),
+        }
+    }
 }
 
 struct DeriveData {
@@ -1266,6 +1274,10 @@ pub struct Resolver<'ra, 'tcx> {
     current_crate_outer_attr_insert_span: Span,
 
     mods_with_parse_errors: FxHashSet<DefId>,
+
+    /// Whether `Resolver::register_macros_for_all_crates` has been called once already, as we
+    /// don't need to run it more than once.
+    all_crate_macros_already_registered: bool = false,
 
     // Stores pre-expansion and pre-placeholder-fragment-insertion names for `impl Trait` types
     // that were encountered during resolution. These names are used to generate item names
@@ -1524,7 +1536,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     && let name = Symbol::intern(name)
                     && name.can_be_raw()
                 {
-                    Some((Macros20NormalizedIdent::with_dummy_span(name), Default::default()))
+                    let ident = Macros20NormalizedIdent::with_dummy_span(name);
+                    Some((ident, ExternPreludeEntry::flag()))
                 } else {
                     None
                 }
@@ -1532,11 +1545,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             .collect();
 
         if !attr::contains_name(attrs, sym::no_core) {
-            extern_prelude
-                .insert(Macros20NormalizedIdent::with_dummy_span(sym::core), Default::default());
+            let ident = Macros20NormalizedIdent::with_dummy_span(sym::core);
+            extern_prelude.insert(ident, ExternPreludeEntry::flag());
             if !attr::contains_name(attrs, sym::no_std) {
-                extern_prelude
-                    .insert(Macros20NormalizedIdent::with_dummy_span(sym::std), Default::default());
+                let ident = Macros20NormalizedIdent::with_dummy_span(sym::std);
+                extern_prelude.insert(ident, ExternPreludeEntry::flag());
             }
         }
 
@@ -1881,7 +1894,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             }
         }
 
-        self.cm().visit_scopes(ScopeSet::All(TypeNS), parent_scope, ctxt, |this, scope, _, _| {
+        let scope_set = ScopeSet::All(TypeNS);
+        self.cm().visit_scopes(scope_set, parent_scope, ctxt, None, |this, scope, _, _| {
             match scope {
                 Scope::Module(module, _) => {
                     this.get_mut().traits_in_module(module, assoc_item, &mut found_traits);
@@ -2057,12 +2071,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             }
             // Avoid marking `extern crate` items that refer to a name from extern prelude,
             // but not introduce it, as used if they are accessed from lexical scope.
-            if used == Used::Scope {
-                if let Some(entry) = self.extern_prelude.get(&Macros20NormalizedIdent::new(ident)) {
-                    if !entry.introduced_by_item && entry.item_binding == Some(used_binding) {
-                        return;
-                    }
-                }
+            if used == Used::Scope
+                && let Some(entry) = self.extern_prelude.get(&Macros20NormalizedIdent::new(ident))
+                && entry.item_binding == Some((used_binding, false))
+            {
+                return;
             }
             let old_used = self.import_use_map.entry(import).or_insert(used);
             if *old_used < used {
@@ -2221,7 +2234,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         finalize: bool,
     ) -> Option<NameBinding<'ra>> {
         let entry = self.extern_prelude.get(&Macros20NormalizedIdent::new(ident));
-        entry.and_then(|entry| entry.item_binding).map(|binding| {
+        entry.and_then(|entry| entry.item_binding).map(|(binding, _)| {
             if finalize {
                 self.get_mut().record_use(ident, binding, Used::Scope);
             }
@@ -2231,31 +2244,30 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
     fn extern_prelude_get_flag(&self, ident: Ident, finalize: bool) -> Option<NameBinding<'ra>> {
         let entry = self.extern_prelude.get(&Macros20NormalizedIdent::new(ident));
-        entry.and_then(|entry| match entry.flag_binding.get() {
-            Some(binding) => {
-                if finalize {
-                    self.cstore_mut().process_path_extern(self.tcx, ident.name, ident.span);
-                }
-                Some(binding)
-            }
-            None if entry.only_item => None,
-            None => {
-                let crate_id = if finalize {
-                    self.cstore_mut().process_path_extern(self.tcx, ident.name, ident.span)
-                } else {
-                    self.cstore_mut().maybe_process_path_extern(self.tcx, ident.name)
-                };
-                match crate_id {
-                    Some(crate_id) => {
-                        let res = Res::Def(DefKind::Mod, crate_id.as_def_id());
-                        let binding =
-                            self.arenas.new_pub_res_binding(res, DUMMY_SP, LocalExpnId::ROOT);
-                        entry.flag_binding.set(Some(binding));
-                        Some(binding)
+        entry.and_then(|entry| entry.flag_binding.as_ref()).and_then(|flag_binding| {
+            let (pending_binding, finalized) = flag_binding.get();
+            let binding = match pending_binding {
+                PendingBinding::Ready(binding) => {
+                    if finalize && !finalized {
+                        self.cstore_mut().process_path_extern(self.tcx, ident.name, ident.span);
                     }
-                    None => finalize.then_some(self.dummy_binding),
+                    binding
                 }
-            }
+                PendingBinding::Pending => {
+                    debug_assert!(!finalized);
+                    let crate_id = if finalize {
+                        self.cstore_mut().process_path_extern(self.tcx, ident.name, ident.span)
+                    } else {
+                        self.cstore_mut().maybe_process_path_extern(self.tcx, ident.name)
+                    };
+                    crate_id.map(|crate_id| {
+                        let res = Res::Def(DefKind::Mod, crate_id.as_def_id());
+                        self.arenas.new_pub_res_binding(res, DUMMY_SP, LocalExpnId::ROOT)
+                    })
+                }
+            };
+            flag_binding.set((PendingBinding::Ready(binding), finalize || finalized));
+            binding.or_else(|| finalize.then_some(self.dummy_binding))
         })
     }
 
@@ -2448,6 +2460,17 @@ fn module_to_string(mut module: Module<'_>) -> Option<String> {
     Some(names_to_string(names.iter().rev().copied()))
 }
 
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum Stage {
+    /// Resolving an import or a macro.
+    /// Used when macro expansion is either not yet finished, or we are finalizing its results.
+    /// Used by default as a more restrictive variant that can produce additional errors.
+    Early,
+    /// Resolving something in late resolution when all imports are resolved
+    /// and all macros are expanded.
+    Late,
+}
+
 #[derive(Copy, Clone, Debug)]
 struct Finalize {
     /// Node ID for linting.
@@ -2460,9 +2483,11 @@ struct Finalize {
     root_span: Span,
     /// Whether to report privacy errors or silently return "no resolution" for them,
     /// similarly to speculative resolution.
-    report_private: bool,
+    report_private: bool = true,
     /// Tracks whether an item is used in scope or used relatively to a module.
-    used: Used,
+    used: Used = Used::Other,
+    /// Finalizing early or late resolution.
+    stage: Stage = Stage::Early,
 }
 
 impl Finalize {
@@ -2471,7 +2496,7 @@ impl Finalize {
     }
 
     fn with_root_span(node_id: NodeId, path_span: Span, root_span: Span) -> Finalize {
-        Finalize { node_id, path_span, root_span, report_private: true, used: Used::Other }
+        Finalize { node_id, path_span, root_span, .. }
     }
 }
 

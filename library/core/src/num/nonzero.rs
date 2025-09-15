@@ -4,7 +4,7 @@ use super::{IntErrorKind, ParseIntError};
 use crate::clone::UseCloned;
 use crate::cmp::Ordering;
 use crate::hash::{Hash, Hasher};
-use crate::marker::{Freeze, StructuralPartialEq};
+use crate::marker::{Destruct, Freeze, StructuralPartialEq};
 use crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};
 use crate::panic::{RefUnwindSafe, UnwindSafe};
 use crate::str::FromStr;
@@ -220,12 +220,14 @@ where
 impl<T> StructuralPartialEq for NonZero<T> where T: ZeroablePrimitive + StructuralPartialEq {}
 
 #[stable(feature = "nonzero", since = "1.28.0")]
-impl<T> Eq for NonZero<T> where T: ZeroablePrimitive + Eq {}
+#[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+impl<T> const Eq for NonZero<T> where T: ZeroablePrimitive + [const] Eq {}
 
 #[stable(feature = "nonzero", since = "1.28.0")]
-impl<T> PartialOrd for NonZero<T>
+#[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+impl<T> const PartialOrd for NonZero<T>
 where
-    T: ZeroablePrimitive + PartialOrd,
+    T: ZeroablePrimitive + [const] PartialOrd,
 {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -254,9 +256,12 @@ where
 }
 
 #[stable(feature = "nonzero", since = "1.28.0")]
-impl<T> Ord for NonZero<T>
+#[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+impl<T> const Ord for NonZero<T>
 where
-    T: ZeroablePrimitive + Ord,
+    // FIXME(const_hack): the T: ~const Destruct should be inferred from the Self: ~const Destruct.
+    // See https://github.com/rust-lang/rust/issues/144207
+    T: ZeroablePrimitive + [const] Ord + [const] Destruct,
 {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
@@ -297,7 +302,7 @@ where
 }
 
 #[stable(feature = "from_nonzero", since = "1.31.0")]
-#[rustc_const_unstable(feature = "const_try", issue = "74935")]
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
 impl<T> const From<NonZero<T>> for T
 where
     T: ZeroablePrimitive,
@@ -679,6 +684,54 @@ macro_rules! nonzero_integer {
                 // SAFETY: `self` is non-zero, so `self` with only its least
                 // significant set bit will remain non-zero.
                 unsafe { NonZero::new_unchecked(n) }
+            }
+
+            /// Returns the index of the highest bit set to one in `self`.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(int_lowest_highest_one)]
+            ///
+            /// # use core::num::NonZero;
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::new(0x1)?.highest_one(), 0);")]
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::new(0x10)?.highest_one(), 4);")]
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::new(0x1f)?.highest_one(), 4);")]
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "int_lowest_highest_one", issue = "145203")]
+            #[must_use = "this returns the result of the operation, \
+                          without modifying the original"]
+            #[inline(always)]
+            pub const fn highest_one(self) -> u32 {
+                Self::BITS - 1 - self.leading_zeros()
+            }
+
+            /// Returns the index of the lowest bit set to one in `self`.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// #![feature(int_lowest_highest_one)]
+            ///
+            /// # use core::num::NonZero;
+            /// # fn main() { test().unwrap(); }
+            /// # fn test() -> Option<()> {
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::new(0x1)?.lowest_one(), 0);")]
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::new(0x10)?.lowest_one(), 4);")]
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::new(0x1f)?.lowest_one(), 0);")]
+            /// # Some(())
+            /// # }
+            /// ```
+            #[unstable(feature = "int_lowest_highest_one", issue = "145203")]
+            #[must_use = "this returns the result of the operation, \
+                          without modifying the original"]
+            #[inline(always)]
+            pub const fn lowest_one(self) -> u32 {
+                self.trailing_zeros()
             }
 
             /// Returns the number of ones in the binary representation of `self`.

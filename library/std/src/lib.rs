@@ -15,7 +15,7 @@
 //!
 //! If you already know the name of what you are looking for, the fastest way to
 //! find it is to use the <a href="#" onclick="window.searchState.focus();">search
-//! bar</a> at the top of the page.
+//! button</a> at the top of the page.
 //!
 //! Otherwise, you may want to jump to one of these useful sections:
 //!
@@ -263,7 +263,6 @@
     all(target_vendor = "fortanix", target_env = "sgx"),
     feature(slice_index_methods, coerce_unsized, sgx_platform)
 )]
-#![cfg_attr(any(windows, target_os = "uefi"), feature(round_char_boundary))]
 #![cfg_attr(target_family = "wasm", feature(stdarch_wasm_atomic_wait))]
 #![cfg_attr(target_arch = "wasm64", feature(simd_wasm64))]
 //
@@ -285,17 +284,16 @@
 #![feature(core_float_math)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
-#![feature(derive_const)]
 #![feature(doc_cfg)]
 #![feature(doc_cfg_hide)]
 #![feature(doc_masked)]
 #![feature(doc_notable_trait)]
 #![feature(dropck_eyepatch)]
-#![feature(extended_varargs_abi_support)]
 #![feature(f16)]
 #![feature(f128)]
 #![feature(ffi_const)]
 #![feature(formatting_options)]
+#![feature(funnel_shifts)]
 #![feature(hash_map_internals)]
 #![feature(hash_map_macro)]
 #![feature(if_let_guard)]
@@ -330,12 +328,10 @@
 #![feature(bstr)]
 #![feature(bstr_internals)]
 #![feature(cast_maybe_uninit)]
+#![feature(cfg_select)]
 #![feature(char_internals)]
 #![feature(clone_to_uninit)]
-#![feature(const_cmp)]
-#![feature(const_ops)]
-#![feature(const_option_ops)]
-#![feature(const_try)]
+#![feature(const_convert)]
 #![feature(core_intrinsics)]
 #![feature(core_io_borrowed_buf)]
 #![feature(drop_guard)]
@@ -349,10 +345,12 @@
 #![feature(float_gamma)]
 #![feature(float_minimum_maximum)]
 #![feature(fmt_internals)]
+#![feature(fn_ptr_trait)]
 #![feature(generic_atomic)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
 #![feature(hint_must_use)]
+#![feature(int_from_ascii)]
 #![feature(ip)]
 #![feature(lazy_get)]
 #![feature(maybe_uninit_slice)]
@@ -368,9 +366,9 @@
 #![feature(slice_internals)]
 #![feature(slice_ptr_get)]
 #![feature(slice_range)]
+#![feature(slice_split_once)]
 #![feature(std_internals)]
 #![feature(str_internals)]
-#![feature(strict_provenance_atomic_ptr)]
 #![feature(sync_unsafe_cell)]
 #![feature(temporary_niche_types)]
 #![feature(ub_checks)]
@@ -390,6 +388,7 @@
 #![feature(try_with_capacity)]
 #![feature(unique_rc_arc)]
 #![feature(vec_into_raw_parts)]
+#![feature(wtf8_internals)]
 // tidy-alphabetical-end
 //
 // Library features (unwind):
@@ -736,6 +735,14 @@ pub use core::{
     assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, r#try, unimplemented,
     unreachable, write, writeln,
 };
+
+// Re-export unstable derive macro defined through core.
+#[unstable(feature = "derive_from", issue = "144889")]
+/// Unstable module containing the unstable `From` derive macro.
+pub mod from {
+    #[unstable(feature = "derive_from", issue = "144889")]
+    pub use core::from::From;
+}
 
 // Include a number of private modules that exist solely to provide
 // the rustdoc documentation for primitive types. Using `include!`

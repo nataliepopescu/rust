@@ -7,6 +7,7 @@ use rustc_errors::{
     MultiSpan, Subdiagnostic,
 };
 use rustc_hir::Target;
+use rustc_hir::attrs::{MirDialect, MirPhase};
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{MainDefinition, Ty};
 use rustc_span::{DUMMY_SP, Span, Symbol};
@@ -63,7 +64,17 @@ pub(crate) struct MixedExportNameAndNoMangle {
 
 #[derive(LintDiagnostic)]
 #[diag(passes_outer_crate_level_attr)]
-pub(crate) struct OuterCrateLevelAttr;
+pub(crate) struct OuterCrateLevelAttr {
+    #[subdiagnostic]
+    pub suggestion: OuterCrateLevelAttrSuggestion,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(passes_outer_crate_level_attr_suggestion, style = "verbose")]
+pub(crate) struct OuterCrateLevelAttrSuggestion {
+    #[suggestion_part(code = "!")]
+    pub bang_position: Span,
+}
 
 #[derive(LintDiagnostic)]
 #[diag(passes_inner_crate_level_attr)]
@@ -184,10 +195,11 @@ pub(crate) struct DocAliasMalformed {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_doc_keyword_empty_mod)]
-pub(crate) struct DocKeywordEmptyMod {
+#[diag(passes_doc_keyword_attribute_empty_mod)]
+pub(crate) struct DocKeywordAttributeEmptyMod {
     #[primary_span]
     pub span: Span,
+    pub attr_name: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -200,10 +212,20 @@ pub(crate) struct DocKeywordNotKeyword {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_doc_keyword_not_mod)]
-pub(crate) struct DocKeywordNotMod {
+#[diag(passes_doc_attribute_not_attribute)]
+#[help]
+pub(crate) struct DocAttributeNotAttribute {
     #[primary_span]
     pub span: Span,
+    pub attribute: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_doc_keyword_attribute_not_mod)]
+pub(crate) struct DocKeywordAttributeNotMod {
+    #[primary_span]
+    pub span: Span,
+    pub attr_name: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -354,14 +376,6 @@ pub(crate) struct HasIncoherentInherentImpl {
 #[diag(passes_both_ffi_const_and_pure, code = E0757)]
 pub(crate) struct BothFfiConstAndPure {
     #[primary_span]
-    pub attr_span: Span,
-}
-
-#[derive(LintDiagnostic)]
-#[diag(passes_must_use_no_effect)]
-pub(crate) struct MustUseNoEffect {
-    pub target: &'static str,
-    #[suggestion(code = "", applicability = "machine-applicable", style = "tool-only")]
     pub attr_span: Span,
 }
 
@@ -1353,6 +1367,22 @@ pub(crate) struct UnusedVarRemoveFieldSugg {
 #[note]
 pub(crate) struct UnusedVarAssignedOnly {
     pub name: String,
+    #[subdiagnostic]
+    pub typo: Option<PatternTypo>,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    passes_unused_var_typo,
+    style = "verbose",
+    applicability = "machine-applicable"
+)]
+pub(crate) struct PatternTypo {
+    #[suggestion_part(code = "{code}")]
+    pub span: Span,
+    pub code: String,
+    pub item_name: String,
+    pub kind: String,
 }
 
 #[derive(LintDiagnostic)]
@@ -1420,6 +1450,8 @@ pub(crate) struct UnusedVariableTryPrefix {
     #[subdiagnostic]
     pub sugg: UnusedVariableSugg,
     pub name: String,
+    #[subdiagnostic]
+    pub typo: Option<PatternTypo>,
 }
 
 #[derive(Subdiagnostic)]
@@ -1488,15 +1520,21 @@ pub(crate) struct AttrCrateLevelOnlySugg {
     pub attr: Span,
 }
 
+/// "sanitize attribute not allowed here"
 #[derive(Diagnostic)]
-#[diag(passes_no_sanitize)]
-pub(crate) struct NoSanitize<'a> {
+#[diag(passes_sanitize_attribute_not_allowed)]
+pub(crate) struct SanitizeAttributeNotAllowed {
     #[primary_span]
     pub attr_span: Span,
-    #[label]
-    pub defn_span: Span,
-    pub accepted_kind: &'a str,
-    pub attr_str: &'a str,
+    /// "not a function, impl block, or module"
+    #[label(passes_not_fn_impl_mod)]
+    pub not_fn_impl_mod: Option<Span>,
+    /// "function has no body"
+    #[label(passes_no_body)]
+    pub no_body: Option<Span>,
+    /// "sanitize attribute can be applied to a function (with body), impl block, or module"
+    #[help]
+    pub help: (),
 }
 
 // FIXME(jdonszelmann): move back to rustc_attr
@@ -1569,4 +1607,35 @@ pub(crate) struct ReprAlignShouldBeAlign {
     #[help]
     pub span: Span,
     pub item: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_repr_align_should_be_align_static)]
+pub(crate) struct ReprAlignShouldBeAlignStatic {
+    #[primary_span]
+    #[help]
+    pub span: Span,
+    pub item: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_custom_mir_phase_requires_dialect)]
+pub(crate) struct CustomMirPhaseRequiresDialect {
+    #[primary_span]
+    pub attr_span: Span,
+    #[label]
+    pub phase_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_custom_mir_incompatible_dialect_and_phase)]
+pub(crate) struct CustomMirIncompatibleDialectAndPhase {
+    pub dialect: MirDialect,
+    pub phase: MirPhase,
+    #[primary_span]
+    pub attr_span: Span,
+    #[label]
+    pub dialect_span: Span,
+    #[label]
+    pub phase_span: Span,
 }
