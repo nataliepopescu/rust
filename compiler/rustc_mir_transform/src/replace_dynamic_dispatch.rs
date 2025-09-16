@@ -7,16 +7,9 @@
 use tracing::debug;
 
 use rustc_middle::mir::*;
-use rustc_middle::ty::*; //{AdtDef, AdtDefData, Ty, TyCtxt}; //RegionKind
-
+use rustc_middle::ty::*;
 use rustc_span::*;
-//use rustc_span::symbol::*;
 use rustc_span::def_id::*;
-//use rustc_abi::*;
-//use rustc_hir::Safety;
-//use rustc_index::IndexVec;
-//use rustc_hashes::Hash64;
-//use rustc_data_structures::intern::Interned;
 
 use crate::patch::MirPatch;
 
@@ -103,7 +96,7 @@ fn replace_dynamic_dispatch<'tcx>(
     // - old unwind: bb22 - cleanup drop dog (_20)
     // - new unwind: bb33 (how to ref non-brittle-y?)
     // /////////////////////////
-    //let _ = add_const_dyn_traitobj_local();
+    let _ = add_const_dyn_traitobj_temp(tcx, patch);
     let _ = add_dynmetadata_temp(tcx, patch);
     //add_raw_const();
     //add_pm_call();
@@ -174,24 +167,60 @@ fn replace_dynamic_dispatch<'tcx>(
     // /////////////////////////
 }
 
+fn add_const_dyn_traitobj_temp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+) -> Local {
+    // get list containing dyn Animal
+    let dummy_args: Vec<GenericArg<'tcx>> = Vec::new();
+    let pep_list = tcx.mk_poly_existential_predicates(&[Binder::dummy(ExistentialPredicate::Trait(
+        ExistentialTraitRef::new(
+            tcx,
+            // TODO how to get this for arbitrary traits
+            DefId { index: DefIndex::from_u32(3), krate: CrateNum::new(0) },
+            dummy_args,
+        )
+    ))]);
+
+    // get Dynamic
+    let dyn_traitobj = Ty::new_dynamic(
+        tcx,
+        pep_list,
+        Region::new_from_kind(tcx, ReErased),
+        DynKind::Dyn,
+    );
+
+    // add *const dyn Animal local to patch
+    patch.new_temp(
+        // ty
+        Ty::new_imm_ptr(
+            tcx,
+            dyn_traitobj,
+        ),
+        // dummy span
+        Span::new(BytePos(0), BytePos(0), SyntaxContext::root(), None),
+    )
+}
+
 fn add_dynmetadata_temp<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
 ) -> Local {
-    // construct DynMetadata AdtDef
+    // get DynMetadata AdtDef
     let dynmetadata_adt_def = tcx.adt_def(tcx.lang_items().dyn_metadata().unwrap());
 
     // construct DynMetadata GenericArgsRef
     let dummy_args: Vec<GenericArg<'tcx>> = Vec::new();
-    let ty_binder_list = tcx.mk_binder_list(&[Binder::dummy(ExistentialPredicate::Trait(
+    let pep_list = tcx.mk_poly_existential_predicates(&[Binder::dummy(ExistentialPredicate::Trait(
         ExistentialTraitRef::new(
             tcx,
+            // TODO how to get this for arbitrary traits
             DefId { index: DefIndex::from_u32(3), krate: CrateNum::new(0) },
             dummy_args,
         )
     ))]);
     let trait_obj_tykind = Dynamic(
-        ty_binder_list,
+        pep_list,
         Region::new_from_kind(tcx, RegionKind::ReErased),
         DynKind::Dyn,
     );
