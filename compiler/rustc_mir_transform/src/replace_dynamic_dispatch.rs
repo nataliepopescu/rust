@@ -1,8 +1,8 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 //! This pass replaces dynamically dispatched function calls with a switch statement of equivalent 
 //! statically dispatched function calls. 
+
+#![allow(dead_code)]
+#![allow(unused_variables)]
 
 use tracing::debug;
 
