@@ -20,6 +20,41 @@ use crate::patch::MirPatch;
 
 pub(super) struct ReplaceDynamicDispatch;
 
+struct SpeakBlockVars {
+    bb_goto: BasicBlock,
+    bb_cleanup: BasicBlock,
+    raw_traitobj1_loc: Local,
+    raw_traitobj2_loc: Local,
+    empty_tup_loc: Local,
+    concrete_ty_loc: Local,
+    concrete_ty_did: DefId,
+    speak_fn_did: DefId,
+}
+
+impl SpeakBlockVars {
+    fn new(
+        bb_goto: BasicBlock,
+        bb_cleanup: BasicBlock,
+        raw_traitobj1_loc: Local,
+        raw_traitobj2_loc: Local,
+        empty_tup_loc: Local,
+        concrete_ty_loc: Local,
+        concrete_ty_did: DefId,
+        speak_fn_did: DefId,
+    ) -> Self {
+        SpeakBlockVars {
+            bb_goto,
+            bb_cleanup,
+            raw_traitobj1_loc,
+            raw_traitobj2_loc,
+            empty_tup_loc,
+            concrete_ty_loc,
+            concrete_ty_did,
+            speak_fn_did,
+        }
+    }
+}
+
 impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.mir_opt_level() > 0 && !sess.emit_lifetime_markers()
@@ -53,6 +88,7 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                 debug!("STMT: {:?}", stmt);
                 id_stmt(&stmt.kind);
             }
+            id_term(tcx, &data.terminator().kind);
             match &data.terminator().kind {
                 TerminatorKind::Call { func, .. } => {
                     if let Some((defid, rawlist)) = func.const_fn_def() {
@@ -69,7 +105,6 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                 }
                 _ => {},
             }
-            id_term(tcx, &data.terminator().kind);
         }
 
         patch.apply(body);
@@ -152,6 +187,8 @@ fn replace_dynamic_dispatch<'tcx>(
     let cat_did_for_assoc_items = impls_vals.nth(1).unwrap().as_slice()[0];
     debug!("cat_did_for_assoc_items: {:?}", cat_did_for_assoc_items);
 
+    // dummy init value b/c the compiler thinks we can 
+    // proceed with an uninit value despite the `init` flag
     let mut cat_speak_did = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
     let mut init = false;
     for assoc_item in tcx.associated_items(cat_did_for_assoc_items).in_definition_order() {
@@ -166,19 +203,30 @@ fn replace_dynamic_dispatch<'tcx>(
     // - could potentially replace our get_cat() and get_dog() fakes
 
     // add locals
-    let const_dyn_to = add_const_dyn_traitobj_temp(tcx, patch, ty);
-    let dyn_md = add_dynmetadata_temp(tcx, patch, to_defid);
-    let raw_to1 = add_raw_traitobj_temp(tcx, patch);
-    let raw_to2 = add_raw_traitobj_temp(tcx, patch);
-    let empty_tup = add_emptytup_temp(tcx, patch);
-    let cat1 = add_catref_temp(tcx, patch, *cat_did);
+    let const_dyn_traitobj_loc = add_const_dyn_traitobj_temp(tcx, patch, ty);
+    let dyn_metadata_loc = add_dynmetadata_temp(tcx, patch, to_defid);
+    let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch);
+    let raw_traitobj2_loc = add_raw_traitobj_temp(tcx, patch);
+    let empty_tup_loc = add_emptytup_temp(tcx, patch);
+    let cat_loc = add_catref_temp(tcx, patch, *cat_did);
+    let bool_loc = add_mut_bool_temp(tcx, patch);
 
     let hardcoded_bb_cleanup = BasicBlock::from_u32(21);
 
     // add blocks backwards to correctly connect edges...
 
     let bb_cat_goto = add_cat_goto_block(tcx, patch);
-    let bb_cat_speak = add_cat_speak_block(tcx, patch, bb_cat_goto, hardcoded_bb_cleanup, raw_to1, raw_to2, empty_tup, cat1, *cat_did, cat_speak_did);
+    let bb_cat_speak = add_cat_speak_block(tcx, patch, SpeakBlockVars::new(
+        bb_cat_goto, 
+        hardcoded_bb_cleanup, 
+        raw_traitobj1_loc, 
+        raw_traitobj2_loc, 
+        empty_tup_loc, 
+        cat_loc, 
+        *cat_did, 
+        cat_speak_did
+    ));
+    let bb_first_switch = add_first_switch_block(tcx, patch, bb_cat_speak, hardcoded_bb_cleanup, bool_loc);
 
 
 
@@ -213,8 +261,8 @@ fn replace_dynamic_dispatch<'tcx>(
     // - old target: bb15 - drop dog (_20)
     // - new target: bb (len)? (how to ref non-brittle-y?)
     // /////////////////////////
-    //add_raw_const(tcx, patch, bb, const_dyn_to);
-    //add_ptrmetadata_call(tcx, body, patch, to_defid, bb, data, bb_len, const_dyn_to, dyn_md);
+    //add_raw_const(tcx, patch, bb, const_dyn_traitobj_loc);
+    //add_ptrmetadata_call(tcx, body, patch, to_defid, bb, data, bb_len, const_dyn_traitobj_loc, dyn_metadata_loc);
 
 
 
@@ -401,6 +449,16 @@ fn add_catref_temp<'tcx>(
     )
 }
 
+fn add_mut_bool_temp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+) -> Local {
+    patch.new_temp(
+        Ty::new(tcx, TyKind::Bool),
+        dummy_span(),
+    )
+}
+
 fn add_cat_goto_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
@@ -421,14 +479,7 @@ fn add_cat_goto_block<'tcx>(
 fn add_cat_speak_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
-    bb_cat_goto: BasicBlock,
-    bb_cleanup: BasicBlock,
-    raw_to1: Local,
-    raw_to2: Local,
-    empty_tup: Local,
-    cat1: Local,
-    cat_did: DefId,
-    cat_speak_did: DefId,
+    sbv: SpeakBlockVars,
 ) -> BasicBlock {
     // /////////////////////////
     // [og place] = [rw place] (n == new local)
@@ -454,22 +505,22 @@ fn add_cat_speak_block<'tcx>(
     // copy raw_animal ptr
     stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
         Box::new((
-            Place { local: raw_to2, projection: empty_proj },
-            Rvalue::Use(Operand::Copy(Place { local: raw_to1, projection: empty_proj })),
+            Place { local: sbv.raw_traitobj2_loc, projection: empty_proj },
+            Rvalue::Use(Operand::Copy(Place { local: sbv.raw_traitobj1_loc, projection: empty_proj })),
         ))
     )));
 
     // transmute raw_animal copy into &Cat
-    let cat_adt_def = tcx.adt_def(cat_did);
+    let cat_adt_def = tcx.adt_def(sbv.concrete_ty_did);
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
 
     stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
         Box::new((
-            Place { local: cat1, projection: empty_proj },
+            Place { local: sbv.concrete_ty_loc, projection: empty_proj },
             Rvalue::Cast(
                 CastKind::Transmute,
-                Operand::Move(Place { local: raw_to2, projection: empty_proj }),
+                Operand::Move(Place { local: sbv.raw_traitobj2_loc, projection: empty_proj }),
                 Ty::new_ref(
                     tcx,
                     Region::new_from_kind(tcx, RegionKind::ReErased),
@@ -491,7 +542,7 @@ fn add_cat_speak_block<'tcx>(
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
 
     let spanned_slice: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
-        node: Operand::Move(Place { local: cat1, projection: empty_proj }),
+        node: Operand::Move(Place { local: sbv.concrete_ty_loc, projection: empty_proj }),
         span: dummy_span(),
     }]);
 
@@ -508,15 +559,15 @@ fn add_cat_speak_block<'tcx>(
                     ConstValue::ZeroSized, 
                     Ty::new_fn_def(
                         tcx,
-                        cat_speak_did, 
+                        sbv.speak_fn_did, 
                         gen_args_ref,
                     ),
                 ),
             })),
             args: spanned_slice,
-            destination: Place { local: empty_tup, projection: empty_proj },
-            target: Some(bb_cat_goto),
-            unwind: UnwindAction::Cleanup(bb_cleanup),
+            destination: Place { local: sbv.empty_tup_loc, projection: empty_proj },
+            target: Some(sbv.bb_goto),
+            unwind: UnwindAction::Cleanup(sbv.bb_cleanup),
             call_source: CallSource::Normal,
             fn_span: dummy_span(),
         },
@@ -526,18 +577,42 @@ fn add_cat_speak_block<'tcx>(
     patch.new_block(bb_data)
 }
 
+fn add_first_switch_block<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    bb_speak: BasicBlock,
+    bb_cleanup: BasicBlock,
+    eq_res_loc: Local,
+) -> BasicBlock {
+    let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
+    let empty_proj = tcx.mk_place_elems(empty_proj_slice);
+
+    let targets = vec![(0u128, bb_speak)].into_iter();
+
+    let term = Terminator {
+        source_info: dummy_source_info(),
+        kind: TerminatorKind::SwitchInt {
+            discr: Operand::Move(Place { local: eq_res_loc, projection: empty_proj }),
+            targets: SwitchTargets::new(targets, bb_cleanup),
+        },
+    };
+
+    let bb_data = BasicBlockData::new(Some(term), false);
+    patch.new_block(bb_data)
+}
+
 fn add_raw_const<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
     bb: BasicBlock,
-    const_dyn_to: Local,
+    const_dyn_traitobj_loc: Local,
 ) {
     let loc = Location { block: bb, statement_index: 4 };
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
     patch.add_assign(
         loc,
-        Place { local: const_dyn_to, projection: empty_proj },
+        Place { local: const_dyn_traitobj_loc, projection: empty_proj },
         Rvalue::RawPtr(
             RawPtrKind::Const, 
             Place { local: Local::from_u32(22), projection: empty_proj },
@@ -553,8 +628,8 @@ fn add_ptrmetadata_call<'a, 'tcx>(
     bb: BasicBlock,
     data: &'a BasicBlockData<'tcx>,
     bb_len: usize,
-    const_dyn_to: Local,
-    dyn_md: Local,
+    const_dyn_traitobj_loc: Local,
+    dyn_metadata_loc: Local,
 ) -> TerminatorEdges<'a, 'tcx> {
     // get old terminator's edges
     let edges = data.terminator().kind.edges();
@@ -600,7 +675,7 @@ fn add_ptrmetadata_call<'a, 'tcx>(
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
 
     let spanned_slice: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
-        node: Operand::Move(Place { local: const_dyn_to, projection: empty_proj }),
+        node: Operand::Move(Place { local: const_dyn_traitobj_loc, projection: empty_proj }),
         span: dummy_span(),
     }]);
 
@@ -620,7 +695,7 @@ fn add_ptrmetadata_call<'a, 'tcx>(
                 ),
             })),
             args: spanned_slice,
-            destination: Place { local: dyn_md, projection: empty_proj },
+            destination: Place { local: dyn_metadata_loc, projection: empty_proj },
             target: Some(BasicBlock::from_usize(bb_len)),
             unwind: UnwindAction::Cleanup(old_cleanup),
             call_source: CallSource::Normal,
