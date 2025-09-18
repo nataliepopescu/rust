@@ -13,6 +13,9 @@ use rustc_span::*;
 use rustc_span::source_map::Spanned;
 use rustc_span::def_id::*;
 
+use rustc_middle::ty::fast_reject::SimplifiedType;
+use std::ops::Index;
+
 use crate::patch::MirPatch;
 
 pub(super) struct ReplaceDynamicDispatch;
@@ -54,7 +57,9 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                 TerminatorKind::Call { func, .. } => {
                     if let Some((defid, rawlist)) = func.const_fn_def() {
                         if tcx.def_path_debug_str(defid).contains("Animal::speak") {
+                            let to_defid: DefId;
                             let ty = rawlist.type_at(0);
+                            id_ty(ty);
                             if ty.is_trait() {
                                 debug!("ty: {:?}", ty);
                                 replace_dynamic_dispatch(tcx, body, &mut patch, ty, bb, data, old_bb_len);
@@ -118,29 +123,62 @@ fn replace_dynamic_dispatch<'tcx>(
                 if let Some(did) = principal_did_opt {
                     to_defid = did;
                 } else {
-                    debug!("no principal - only-auto traits - don't need to replace");
+                    debug!("auto traits only - nothing to replace");
                     return;
                 }
+            } else {
+                return;
             }
         },
-        _ => debug!("trait is not Dynamic"),
+        // realistically can just return, but panicking for now to see
+        // if this is ever triggered
+        _ => panic!("trait is not Dynamic"),
     }
+
+    // get trait impl defids
+    // alternatively, replace trait_impls_of() => all_impls()
+    let nb_impls_dids = tcx.trait_impls_of(to_defid).non_blanket_impls();
+    debug!("non-blanket dids: {:?}", nb_impls_dids);
+    let impls_keys = nb_impls_dids.keys();
+    let mut impls_vals = nb_impls_dids.values();
+
+    let cat_did;
+    let cat_simp = impls_keys.index(1);
+    match cat_simp {
+        SimplifiedType::Adt(did) => cat_did = did,
+        _ => panic!("impl is not Adt"),
+    }
+
+    let cat_did_for_assoc_items = impls_vals.nth(1).unwrap().as_slice()[0];
+    debug!("cat_did_for_assoc_items: {:?}", cat_did_for_assoc_items);
+
+    let mut cat_speak_did = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
+    let mut init = false;
+    for assoc_item in tcx.associated_items(cat_did_for_assoc_items).in_definition_order() {
+        cat_speak_did = assoc_item.def_id;
+        init = true;
+    }
+    if !init {
+        panic!("no assoc items!");
+    }
+
+    // try: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.vtable_entries
+    // - could potentially replace our get_cat() and get_dog() fakes
 
     // add locals
     let const_dyn_to = add_const_dyn_traitobj_temp(tcx, patch, ty);
     let dyn_md = add_dynmetadata_temp(tcx, patch, to_defid);
     let raw_to1 = add_raw_traitobj_temp(tcx, patch);
     let raw_to2 = add_raw_traitobj_temp(tcx, patch);
+    let empty_tup = add_emptytup_temp(tcx, patch);
+    let cat1 = add_catref_temp(tcx, patch, *cat_did);
 
-    // get trait impl defids
-
-    // try: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.vtable_entries
-    // - could potentially replace our get_cat() and get_dog() fakes
+    let hardcoded_bb_cleanup = BasicBlock::from_u32(21);
 
     // add blocks backwards to correctly connect edges...
 
     let bb_cat_goto = add_cat_goto_block(tcx, patch);
-    let bb_cat_speak = add_cat_speak_block(tcx, patch, bb_cat_goto, raw_to1, raw_to2);
+    let bb_cat_speak = add_cat_speak_block(tcx, patch, bb_cat_goto, hardcoded_bb_cleanup, raw_to1, raw_to2, empty_tup, cat1, *cat_did, cat_speak_did);
 
 
 
@@ -235,6 +273,11 @@ fn dummy_source_info() -> SourceInfo {
     }
 }
 
+fn make_empty_tup<'tcx>(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
+    let tup_inner: &[Ty<'tcx>] = &[];
+    Ty::new_tup(tcx, tup_inner)
+}
+
 fn add_const_dyn_traitobj_temp<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
@@ -251,26 +294,8 @@ fn add_const_dyn_traitobj_temp<'tcx>(
     // - let mut _22: *const dyn Animal;
     // /////////////////////////
 
-    // get list containing dyn Animal
-    /*
-    let dummy_args: Vec<GenericArg<'tcx>> = Vec::new();
-    let pep_list = tcx.mk_poly_existential_predicates(&[Binder::dummy(ExistentialPredicate::Trait(
-        ExistentialTraitRef::new(
-            tcx,
-            to_defid,
-            dummy_args,
-        )
-    ))]);
-    */
-
-    // get Dynamic
+    // get dyn Animal
     let dyn_traitobj = ty.clone();
-    //Ty::new_dynamic(
-    //    tcx,
-    //    pep_list,
-    //    Region::new_from_kind(tcx, ReErased),
-    //    DynKind::Dyn,
-    //);
 
     // add *const dyn Animal local to patch
     patch.new_temp(
@@ -337,12 +362,40 @@ fn add_raw_traitobj_temp<'tcx>(
     // new local: 
     // - scope 8 { let _30: *const (); ... }
     // /////////////////////////
-    let tup_inner: &[Ty<'tcx>] = &[];
-    let tup = Ty::new_tup(tcx, tup_inner);
     patch.new_temp(
         Ty::new_imm_ptr(
             tcx,
-            tup,
+            make_empty_tup(tcx),
+        ),
+        dummy_span(),
+    )
+}
+
+fn add_emptytup_temp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+) -> Local {
+    patch.new_temp(make_empty_tup(tcx), dummy_span())
+}
+
+fn add_catref_temp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    cat_did: DefId,
+) -> Local {
+    let cat_adt_def = tcx.adt_def(cat_did);
+    let gen_args: &[GenericArg<'tcx>] = &[];
+    let gen_args_ref = tcx.mk_args(gen_args);
+    patch.new_temp(
+        Ty::new_ref(
+            tcx,
+            Region::new_from_kind(tcx, RegionKind::ReErased),
+            Ty::new_adt(
+                tcx,
+                cat_adt_def,
+                gen_args_ref,
+            ),
+            Mutability::Not,
         ),
         dummy_span(),
     )
@@ -369,9 +422,14 @@ fn add_cat_speak_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
     bb_cat_goto: BasicBlock,
+    bb_cleanup: BasicBlock,
     raw_to1: Local,
     raw_to2: Local,
-) { //-> BasicBlock {
+    empty_tup: Local,
+    cat1: Local,
+    cat_did: DefId,
+    cat_speak_did: DefId,
+) -> BasicBlock {
     // /////////////////////////
     // [og place] = [rw place] (n == new local)
     //  = _30 (*const ()) - (raw_animal)
@@ -401,58 +459,71 @@ fn add_cat_speak_block<'tcx>(
         ))
     )));
 
-    // FIXME HERE
     // transmute raw_animal copy into &Cat
-
-    //let cat_adt_variants = IndexVec::new();
-
-    //let cat_adt_def = tcx.mk_adt_def(
-    //    DefId { index: DefIndex::from_u32(9), krate: CrateNum::new(0) },
-    //    AdtKind::Struct,
-    //    cat_adt_variants,
-    //    ReprOptions {
-    //    },
-    //);
-
+    let cat_adt_def = tcx.adt_def(cat_did);
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
 
-    /*
     stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
         Box::new((
             Place { local: cat1, projection: empty_proj },
             Rvalue::Cast(
                 CastKind::Transmute,
-                Move(Place { local: raw_to2, projection: empty_proj }),
+                Operand::Move(Place { local: raw_to2, projection: empty_proj }),
                 Ty::new_ref(
                     tcx,
-                    Region::ReErased,
-                    // ty
+                    Region::new_from_kind(tcx, RegionKind::ReErased),
                     Ty::new_adt(
                         tcx,
                         cat_adt_def,
                         gen_args_ref,
-                    )
+                    ),
                     Mutability::Not,
                 ),
             ),
         ))
     )));
-    */
 
-    // why &*? try just using result of prev as speak arg
+    // why &*s? try just using result of prev as speak arg
 
-    /*
     // construct Cat::speak call
+    let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
+    let empty_proj = tcx.mk_place_elems(empty_proj_slice);
+
+    let spanned_slice: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
+        node: Operand::Move(Place { local: cat1, projection: empty_proj }),
+        span: dummy_span(),
+    }]);
+
+    let gen_args: &[GenericArg<'tcx>] = &[];
+    let gen_args_ref = tcx.mk_args(gen_args);
+
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::Call {
+            func: Operand::Constant(Box::new(ConstOperand {
+                span: dummy_span(),
+                user_ty: None,
+                const_: rustc_middle::mir::Const::Val(
+                    ConstValue::ZeroSized, 
+                    Ty::new_fn_def(
+                        tcx,
+                        cat_speak_did, 
+                        gen_args_ref,
+                    ),
+                ),
+            })),
+            args: spanned_slice,
+            destination: Place { local: empty_tup, projection: empty_proj },
+            target: Some(bb_cat_goto),
+            unwind: UnwindAction::Cleanup(bb_cleanup),
+            call_source: CallSource::Normal,
+            fn_span: dummy_span(),
         },
-    }
+    };
 
-    let bb_data = BasicBlockData::new_stmts(stmt, Some(term), false);
+    let bb_data = BasicBlockData::new_stmts(stmts, Some(term), false);
     patch.new_block(bb_data)
-    */
 }
 
 fn add_raw_const<'tcx>(
@@ -802,16 +873,17 @@ fn id_term<'tcx>(
                                     // arg, which may happen to be dyn,
                                     // as we've seen in `into_raw()`)
                                     debug!("def_kind: {:?}", tcx.def_kind(defid));
-                                    debug!("dbg string: {:?}", tcx.def_path_debug_str(*defid));
-                                    if tcx.def_path_debug_str(*defid).contains("Animal::speak") {
-                                        debug!("HARDCODED FIND");
-                                        let first_ty = rawlist.type_at(0);
-                                        debug!("***TYPE[0]: {:?}", first_ty);
-                                        debug!("is_trait: {:?}", first_ty.is_trait());
-                                        if first_ty.is_trait() {
-                                            debug!("replace this!");
-                                        }
-                                    }
+
+                                    //debug!("dbg string: {:?}", tcx.def_path_debug_str(*defid));
+                                    //if tcx.def_path_debug_str(*defid).contains("Animal::speak") {
+                                    //    debug!("HARDCODED FIND");
+                                    //    let first_ty = rawlist.type_at(0);
+                                    //    debug!("***TYPE[0]: {:?}", first_ty);
+                                    //    debug!("is_trait: {:?}", first_ty.is_trait());
+                                    //    if first_ty.is_trait() {
+                                    //        debug!("replace this!");
+                                    //    }
+                                    //}
                                 }
                                 _ => {}
                             }
