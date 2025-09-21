@@ -202,24 +202,60 @@ fn replace_dynamic_dispatch<'tcx>(
     // try: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.vtable_entries
     // - could potentially replace our get_cat() and get_dog() fakes
 
-    let hardcoded_bb_cleanup = BasicBlock::from_u32(21);
+    // get old terminator's edges
+    let edges = data.terminator().kind.edges();
+    let bb_old_return;
+    let bb_old_cleanup;
+    match edges {
+        TerminatorEdges::AssignOnReturn { return_, cleanup, .. } => {
+            debug!("edges problems?");
+            if return_.len() > 1 {
+                debug!("RET: multiple return blocks");
+            }
+            if cleanup.is_none() {
+                debug!("CLN: no cleanup");
+            }
+            bb_old_return = return_[0];
+            bb_old_cleanup = cleanup.unwrap();
+        },
+        _ => {
+            debug!("another TerminatorEdges");
+            panic!("verifopt: need to set terminator edges");
+        }
+    }
 
+    // /////////////////////////
     // add locals
+    // /////////////////////////
     // TODO all added locals are mutable... is this important post-borrowck?
     // if so, how to make immut?
-
-    // let mut: *const dyn Animal;
-    let const_dyn_traitobj_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _22
 
     // let _: std:ptr::DynMetadata<dyn Animal>;
     let dynmetadata_animal_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // _21
     let dynmetadata_cat_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24
     //let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _27
 
+    // let mut: *const dyn Animal;
+    let const_dyn_traitobj_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _22
+    let const_dyn_traitobj_cat_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _25
+    let const_dyn_traitobj_cat_loc2 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52
+    //let const_dyn_traitobj_dog_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _28
+
+    // let _: &dyn Animal;
+    let dyn_traitobj_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _23
+    let dyn_traitobj_cat_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _26
+    //let dyn_traitobj_dog_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _29
+
     // let mut _: &std:ptr::DynMetadata<dyn Animal>;
     let dynmetadata_animal_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _34, _42?
     let dynmetadata_cat_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _35
     //let dynmetadata_dog_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _43
+
+    // let mut _: std::boxed::Box<dyn Animal>;
+    let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32
+    let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17
+    let boxed_dyn_traitobj_cat_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _19
+    //let boxed_dyn_traitobj_dog_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _20
 
     // let _: *const ();
     let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch); // _30
@@ -230,10 +266,6 @@ fn replace_dynamic_dispatch<'tcx>(
     // let mut _: *mut dyn Animal;
     let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31
 
-    // let mut _: std::boxed::Box<dyn Animal>;
-    let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32
-    let boxed_dyn_traitobj_loc2 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17
-
     // let _: ();
     let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39
 
@@ -243,11 +275,14 @@ fn replace_dynamic_dispatch<'tcx>(
     // let mut _: bool;
     let first_eq_res_loc = add_mut_bool_temp(tcx, patch); // _33
 
+    // /////////////////////////
     // add / modify blocks
-    let bb_cat_goto = add_cat_goto_block(tcx, patch);
+    // /////////////////////////
+
+    let bb_cat_goto = add_cat_goto_block(tcx, patch, bb_old_return);
     let bb_cat_speak = add_cat_speak_block(tcx, patch, SpeakBlockVars::new(
         bb_cat_goto, 
-        hardcoded_bb_cleanup, 
+        bb_old_cleanup, 
         raw_traitobj1_loc, 
         raw_traitobj2_loc, 
         empty_tup_loc, 
@@ -260,14 +295,14 @@ fn replace_dynamic_dispatch<'tcx>(
         tcx, 
         patch, 
         bb_cat_speak, 
-        hardcoded_bb_cleanup, 
+        bb_old_cleanup, 
         first_eq_res_loc
     );
     let bb_first_compare = add_first_compare_block(
         tcx, 
         patch, 
         bb_first_switch, 
-        hardcoded_bb_cleanup, 
+        bb_old_cleanup, 
         raw_traitobj1_loc, 
         mut_dyn_traitobj_loc,
         dynmetadata_animal_loc,
@@ -282,55 +317,53 @@ fn replace_dynamic_dispatch<'tcx>(
         tcx, 
         patch, 
         bb_first_compare, 
-        hardcoded_bb_cleanup, 
+        bb_old_cleanup, 
         mut_dyn_traitobj_loc,
         boxed_dyn_traitobj_loc1,
-        boxed_dyn_traitobj_loc2,
+        boxed_dyn_traitobj_animal_loc,
+        traitobj_did
+    );
+
+    let bb_cat_ptr_metadata = add_ptr_metadata_block(
+        tcx, 
+        patch, 
+        bb_into_raw, 
+        bb_old_cleanup, 
+        boxed_dyn_traitobj_cat_loc,
+        dyn_traitobj_cat_loc,
+        const_dyn_traitobj_cat_loc2,
+        dynmetadata_cat_loc,
         traitobj_did
     );
 
     // /////////////////////////
-    // add block (cat ptr_metadata):
-    // - copy std::ptr::Unique<dyn Animal>.0: std::ptr::NonNull<dyn Animal>) as *const dyn Animal (Transmute);
-    // - &*
+    // replace old terminator (to dyn Animal::speak()) with:
     // - &raw const
     // - ptr_metadata call
     // /////////////////////////
+    add_raw_const_stmt(
+        tcx, 
+        patch, 
+        bb, 
+        const_dyn_traitobj_loc, 
+        dyn_traitobj_loc
+    );
+    // FIXME this function is messing validation up
+    replace_term_ptrmetadata_call(
+        tcx, 
+        patch, 
+        traitobj_did, 
+        bb, 
+        bb_cat_ptr_metadata, 
+        bb_old_cleanup, 
+        dynmetadata_animal_loc,
+        const_dyn_traitobj_loc, 
+    );
 
-
-
-    // /////////////////////////
-
-
-
-    // /////////////////////////
-    // replace current call with:
-    // - &raw const
-    // - ptr_metadata call
-    //
-    // [old bb] = [rw bb]
-    // bb15 = bb28
-    // bb21 = bb33 (cleanup)
-    //
-    // maintain target/unwind bb links
-    // - old target: bb15 - drop dog (_20)
-    // - new target: bb (len)? (how to ref non-brittle-y?)
-    // /////////////////////////
-    //add_raw_const(tcx, patch, bb, const_dyn_traitobj_loc);
-    //add_ptrmetadata_call(tcx, body, patch, traitobj_did, bb, data, bb_len, const_dyn_traitobj_loc, dynmetadata_animal_loc);
-
-
+    // ////////////////
 
     // /////////////////////////
-    // add block (dog ptr_metadata) - same as cat
-    // /////////////////////////
-
-    // /////////////////////////
-    // add block (second compare) - like first compare
-    // /////////////////////////
-
-    // /////////////////////////
-    // add block (second switch) - like first switch
+    // add block (dog goto) ? - like cat goto
     // /////////////////////////
 
     // /////////////////////////
@@ -338,10 +371,18 @@ fn replace_dynamic_dispatch<'tcx>(
     // /////////////////////////
 
     // /////////////////////////
-    // add block (dog goto) ? - like cat goto
+    // add block (second switch) - like first switch
     // /////////////////////////
 
+    // /////////////////////////
+    // add block (second compare) - like first compare
+    // /////////////////////////
 
+    // /////////////////////////
+    // add block (dog ptr_metadata) - same as cat
+    // /////////////////////////
+
+    // ////////////////
 
     // /////////////////////////
     // make sure cleanup funnels to the same place
@@ -364,22 +405,31 @@ fn make_empty_tup<'tcx>(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
     Ty::new_tup(tcx, tup_inner)
 }
 
+fn add_dyn_traitobj_temp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    ty: Ty<'tcx>,
+) -> Local {
+    // get dyn Animal
+    let dyn_traitobj = ty.clone();
+
+    // add &dyn Animal local to patch
+    patch.new_temp(
+        Ty::new_ref(
+            tcx,
+            Region::new_from_kind(tcx, RegionKind::ReErased),
+            dyn_traitobj,
+            Mutability::Not,
+        ),
+        dummy_span(),
+    )
+}
+
 fn add_const_dyn_traitobj_temp<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
     ty: Ty<'tcx>,
 ) -> Local {
-    // /////////////////////////
-    // [og place] = [rw place] (n == new local)
-    // _24 = _51
-    // _22 = _23
-    // _25n = _22 (*const dyn Animal)
-    // _26n = _21 (DynMetadata<dyn Animal>)
-    //
-    // new local: 
-    // - let mut _22: *const dyn Animal;
-    // /////////////////////////
-
     // get dyn Animal
     let dyn_traitobj = ty.clone();
 
@@ -441,18 +491,6 @@ fn add_dynmetadata_temp<'tcx>(
     patch: &mut MirPatch<'tcx>,
     traitobj_did: DefId,
 ) -> Local {
-    // /////////////////////////
-    // [og place] = [rw place] (n == new local)
-    // _24 = _51
-    // _22 = _23
-    // _25n = _22 (*const dyn Animal)
-    // _26n = _21 (DynMetadata<dyn Animal>)
-    //
-    // new local: 
-    // - scope 5 { let _21: std::ptr::DynMetadata<dyn Animal>; ... }
-    // /////////////////////////
-
-    // add DynMetadata local to patch
     let dm_adt = make_dynmetadata_adt(tcx, patch, traitobj_did);
     patch.new_temp(
         dm_adt,
@@ -482,10 +520,6 @@ fn add_raw_traitobj_temp<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
 ) -> Local {
-    // /////////////////////////
-    // new local: 
-    // - scope 8 { let _30: *const (); ... }
-    // /////////////////////////
     patch.new_temp(
         Ty::new_imm_ptr(
             tcx,
@@ -565,13 +599,12 @@ fn add_mut_bool_temp<'tcx>(
 fn add_cat_goto_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
+    bb_return: BasicBlock,
 ) -> BasicBlock {
-    // TODO construct statements (storage live/dead)
-
     // construct terminator
     let term = Terminator {
         source_info: dummy_source_info(),
-        kind: TerminatorKind::Goto { target: BasicBlock::from_u32(15) },
+        kind: TerminatorKind::Goto { target: bb_return },
     };
 
     let bb_data = BasicBlockData::new(Some(term), false);
@@ -817,7 +850,7 @@ fn add_into_raw_block<'tcx>(
     bb_cleanup: BasicBlock,
     mut_dyn_traitobj_loc: Local,
     boxed_dyn_traitobj_loc1: Local,
-    boxed_dyn_traitobj_loc2: Local,
+    boxed_dyn_traitobj_animal_loc: Local,
     traitobj_did: DefId,
 ) -> BasicBlock {
     // /////////////////////////
@@ -834,7 +867,7 @@ fn add_into_raw_block<'tcx>(
     stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
         Box::new((
             Place { local: boxed_dyn_traitobj_loc1, projection: empty_proj },
-            Rvalue::Use(Operand::Move(Place { local: boxed_dyn_traitobj_loc2, projection: empty_proj })),
+            Rvalue::Use(Operand::Move(Place { local: boxed_dyn_traitobj_animal_loc, projection: empty_proj })),
         ))
     )));
 
@@ -877,11 +910,110 @@ fn add_into_raw_block<'tcx>(
     patch.new_block(bb_data)
 }
 
-fn add_raw_const<'tcx>(
+fn add_ptr_metadata_block<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    bb_next: BasicBlock,
+    bb_cleanup: BasicBlock,
+    boxed_dyn_traitobj_loc: Local,
+    dyn_traitobj_loc: Local,
+    const_dyn_traitobj_loc: Local,
+    dynmetadata_loc: Local,
+    traitobj_did: DefId,
+) -> BasicBlock {
+    // /////////////////////////
+    // add ptr_metadata block:
+    // - copy std::ptr::Unique<dyn Animal>.0: std::ptr::NonNull<dyn Animal>) as *const dyn Animal (Transmute);
+    // - &*
+    // - &raw const
+    // - ptr_metadata call
+    // /////////////////////////
+
+    let dyn_traitobj_tykind = make_dyn_traitobj_tykind(tcx, patch, traitobj_did);
+    let dyn_traitobj_ty = tcx.mk_ty_from_kind(dyn_traitobj_tykind);
+
+    let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
+    let empty_proj = tcx.mk_place_elems(empty_proj_slice);
+
+    let mut stmts: Vec<Statement<'tcx>> = Vec::new();
+
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
+        Box::new((
+            Place { local: const_dyn_traitobj_loc, projection: empty_proj },
+            Rvalue::Cast(
+                CastKind::Transmute,
+                // FIXME this is (i.e.) local # _19, but how to access _19.0?
+                Operand::Copy(Place { local: boxed_dyn_traitobj_loc, projection: empty_proj }),
+                Ty::new_ptr(
+                    tcx,
+                    dyn_traitobj_ty,
+                    Mutability::Not,
+                ),
+            ),
+        ))
+    )));
+
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
+        Box::new((
+            Place { local: dyn_traitobj_loc, projection: empty_proj },
+            Rvalue::Ref(
+                Region::new_from_kind(tcx, RegionKind::ReErased),
+                rustc_middle::mir::BorrowKind::Shared,
+                Place { local: const_dyn_traitobj_loc, projection: empty_proj },
+            ),
+        ))
+    )));
+
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::Assign(
+        Box::new((
+            Place { local: const_dyn_traitobj_loc, projection: empty_proj },
+            Rvalue::RawPtr(RawPtrKind::Const, Place { local: dyn_traitobj_loc, projection: empty_proj }),
+        ))
+    )));
+
+    let dyn_traitobj_tykind = make_dyn_traitobj_tykind(tcx, patch, traitobj_did);
+    let dyn_traitobj_ty = tcx.mk_ty_from_kind(dyn_traitobj_tykind);
+    let gen_args_ref = tcx.mk_args(&[GenericArg::from(dyn_traitobj_ty)]);
+
+    let args: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
+        node: Operand::Move(Place { local: const_dyn_traitobj_loc, projection: empty_proj }),
+        span: dummy_span(),
+    }]);
+
+    let term = Terminator {
+        source_info: dummy_source_info(),
+        kind: TerminatorKind::Call {
+            func: Operand::Constant(Box::new(ConstOperand {
+                span: dummy_span(),
+                user_ty: None,
+                const_: rustc_middle::mir::Const::Val(
+                    ConstValue::ZeroSized, 
+                    Ty::new_fn_def(
+                        tcx,
+                        DefId { index: DefIndex::from_u32(2452), krate: CrateNum::from_u32(2) },
+                        gen_args_ref,
+                    ),
+                ),
+            })),
+            args: args,
+            destination: Place { local: dynmetadata_loc, projection: empty_proj },
+            target: Some(bb_next),
+            unwind: UnwindAction::Cleanup(bb_cleanup),
+            call_source: CallSource::Normal,
+            fn_span: dummy_span(),
+        }
+    };
+
+    let bb_data = BasicBlockData::new_stmts(stmts, Some(term), false);
+    patch.new_block(bb_data)
+}
+
+fn add_raw_const_stmt<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
     bb: BasicBlock,
     const_dyn_traitobj_loc: Local,
+    dyn_traitobj_loc: Local,
 ) {
     let loc = Location { block: bb, statement_index: 4 };
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
@@ -891,64 +1023,29 @@ fn add_raw_const<'tcx>(
         Place { local: const_dyn_traitobj_loc, projection: empty_proj },
         Rvalue::RawPtr(
             RawPtrKind::Const, 
-            Place { local: Local::from_u32(22), projection: empty_proj },
+            Place { local: dyn_traitobj_loc, projection: empty_proj },
         ),
     );
 }
 
-fn add_ptrmetadata_call<'a, 'tcx>(
+fn replace_term_ptrmetadata_call<'tcx>(
     tcx: TyCtxt<'tcx>,
-    body: &Body<'tcx>,
     patch: &mut MirPatch<'tcx>,
     traitobj_did: DefId,
     bb: BasicBlock,
-    data: &'a BasicBlockData<'tcx>,
-    bb_len: usize,
-    const_dyn_traitobj_loc: Local,
+    bb_next: BasicBlock,
+    bb_cleanup: BasicBlock,
     dynmetadata_loc: Local,
-) -> TerminatorEdges<'a, 'tcx> {
-    // get old terminator's edges
-    let edges = data.terminator().kind.edges();
-    //let old_return;
-    let old_cleanup;
-    match edges {
-        TerminatorEdges::AssignOnReturn { return_, cleanup, .. } => {
-            debug!("edges problems?");
-            if return_.len() > 1 {
-                debug!("RET: multiple return blocks");
-            }
-            if cleanup.is_none() {
-                debug!("CLN: no cleanup");
-            }
-            //old_return = return_[0];
-            old_cleanup = cleanup.unwrap();
-        },
-        _ => {
-            debug!("another TerminatorEdges");
-            panic!("verifopt: need to set terminator edges");
-        }
-    }
-
-    // construct args list (containing dyn Animal)
-    let dummy_args: Vec<GenericArg<'tcx>> = Vec::new();
-    let pep_list = tcx.mk_poly_existential_predicates(&[Binder::dummy(ExistentialPredicate::Trait(
-        ExistentialTraitRef::new(
-            tcx,
-            traitobj_did,
-            dummy_args,
-        )
-    ))]);
-    let dyn_traitobj_tykind = Dynamic(
-        pep_list,
-        Region::new_from_kind(tcx, RegionKind::ReErased),
-        DynKind::Dyn,
-    );
-    let dyn_traitobj_ty = tcx.mk_ty_from_kind(dyn_traitobj_tykind);
-    let gen_args_ref = tcx.mk_args(&[GenericArg::from(dyn_traitobj_ty)]);
-
+    const_dyn_traitobj_loc: Local,
+) {
     // make empty projection
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
+
+
+    let dyn_traitobj_tykind = make_dyn_traitobj_tykind(tcx, patch, traitobj_did);
+    let dyn_traitobj_ty = tcx.mk_ty_from_kind(dyn_traitobj_tykind);
+    let gen_args_ref = tcx.mk_args(&[GenericArg::from(dyn_traitobj_ty)]);
 
     let args: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
         node: Operand::Move(Place { local: const_dyn_traitobj_loc, projection: empty_proj }),
@@ -972,17 +1069,13 @@ fn add_ptrmetadata_call<'a, 'tcx>(
             })),
             args: args,
             destination: Place { local: dynmetadata_loc, projection: empty_proj },
-            target: Some(BasicBlock::from_usize(bb_len)),
-            unwind: UnwindAction::Cleanup(old_cleanup),
+            target: Some(bb_next),
+            unwind: UnwindAction::Cleanup(bb_cleanup),
             call_source: CallSource::Normal,
             fn_span: dummy_span(),
         }
     );
-
-    // return old terminator's edges (patch has not been applied yet)
-    edges
 }
-
 
 
 
