@@ -1,5 +1,5 @@
-//! This pass replaces dynamically dispatched function calls with a switch statement of equivalent 
-//! statically dispatched function calls. 
+//! This pass replaces dynamically dispatched function calls with a switch statement of equivalent
+//! statically dispatched function calls.
 
 #![allow(dead_code)]
 #![allow(unused_variables)]
@@ -187,7 +187,7 @@ fn replace_dynamic_dispatch<'tcx>(
     let cat_did_for_assoc_items = impls_vals.nth(1).unwrap().as_slice()[0];
     debug!("cat_did_for_assoc_items: {:?}", cat_did_for_assoc_items);
 
-    // dummy init value b/c the compiler thinks we can 
+    // dummy init value b/c the compiler thinks we can
     // proceed with an uninit value despite the `init` flag
     let mut cat_speak_did = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
     let mut init = false;
@@ -281,29 +281,29 @@ fn replace_dynamic_dispatch<'tcx>(
 
     let bb_cat_goto = add_cat_goto_block(tcx, patch, bb_old_return);
     let bb_cat_speak = add_cat_speak_block(tcx, patch, SpeakBlockVars::new(
-        bb_cat_goto, 
-        bb_old_cleanup, 
-        raw_traitobj1_loc, 
-        raw_traitobj2_loc, 
-        empty_tup_loc, 
-        cat_loc, 
-        *cat_did, 
+        bb_cat_goto,
+        bb_old_cleanup,
+        raw_traitobj1_loc,
+        raw_traitobj2_loc,
+        empty_tup_loc,
+        cat_loc,
+        *cat_did,
         cat_speak_did
     ));
 
     let bb_first_switch = add_first_switch_block(
-        tcx, 
-        patch, 
-        bb_cat_speak, 
-        bb_old_cleanup, 
+        tcx,
+        patch,
+        bb_cat_speak,
+        bb_old_cleanup,
         first_eq_res_loc
     );
     let bb_first_compare = add_first_compare_block(
-        tcx, 
-        patch, 
-        bb_first_switch, 
-        bb_old_cleanup, 
-        raw_traitobj1_loc, 
+        tcx,
+        patch,
+        bb_first_switch,
+        bb_old_cleanup,
+        raw_traitobj1_loc,
         mut_dyn_traitobj_loc,
         dynmetadata_animal_loc,
         dynmetadata_animal_ref_loc,
@@ -314,10 +314,10 @@ fn replace_dynamic_dispatch<'tcx>(
     );
 
     let bb_into_raw = add_into_raw_block(
-        tcx, 
-        patch, 
-        bb_first_compare, 
-        bb_old_cleanup, 
+        tcx,
+        patch,
+        bb_first_compare,
+        bb_old_cleanup,
         mut_dyn_traitobj_loc,
         boxed_dyn_traitobj_loc1,
         boxed_dyn_traitobj_animal_loc,
@@ -325,10 +325,10 @@ fn replace_dynamic_dispatch<'tcx>(
     );
 
     let bb_cat_ptr_metadata = add_ptr_metadata_block(
-        tcx, 
-        patch, 
-        bb_into_raw, 
-        bb_old_cleanup, 
+        tcx,
+        patch,
+        bb_into_raw,
+        bb_old_cleanup,
         boxed_dyn_traitobj_cat_loc,
         dyn_traitobj_cat_loc,
         const_dyn_traitobj_cat_loc2,
@@ -342,22 +342,22 @@ fn replace_dynamic_dispatch<'tcx>(
     // - ptr_metadata call
     // /////////////////////////
     add_raw_const_stmt(
-        tcx, 
-        patch, 
-        bb, 
-        const_dyn_traitobj_loc, 
+        tcx,
+        patch,
+        bb,
+        const_dyn_traitobj_loc,
         dyn_traitobj_loc
     );
     // FIXME this function is messing validation up
     replace_term_ptrmetadata_call(
-        tcx, 
-        patch, 
-        traitobj_did, 
-        bb, 
-        bb_cat_ptr_metadata, 
-        bb_old_cleanup, 
+        tcx,
+        patch,
+        traitobj_did,
+        bb,
+        bb_cat_ptr_metadata,
+        bb_old_cleanup,
         dynmetadata_animal_loc,
-        const_dyn_traitobj_loc, 
+        const_dyn_traitobj_loc,
     );
 
     // ////////////////
@@ -396,6 +396,7 @@ fn dummy_span() -> Span {
 fn dummy_source_info() -> SourceInfo {
     SourceInfo {
         span: dummy_span(),
+        // FIXME use for scoping!
         scope: SourceScope::ZERO,
     }
 }
@@ -692,10 +693,10 @@ fn add_cat_speak_block<'tcx>(
                 span: dummy_span(),
                 user_ty: None,
                 const_: rustc_middle::mir::Const::Val(
-                    ConstValue::ZeroSized, 
+                    ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
-                        sbv.speak_fn_did, 
+                        sbv.speak_fn_did,
                         gen_args_ref,
                     ),
                 ),
@@ -742,7 +743,7 @@ fn add_first_compare_block<'tcx>(
     patch: &mut MirPatch<'tcx>,
     bb_first_switch: BasicBlock,
     bb_cleanup: BasicBlock,
-    raw_traitobj1_loc: Local, 
+    raw_traitobj1_loc: Local,
     mut_dyn_traitobj_loc: Local,
     dynmetadata_traitobj_loc: Local,
     dynmetadata_traitobj_ref_loc: Local,
@@ -822,7 +823,7 @@ fn add_first_compare_block<'tcx>(
                 span: dummy_span(),
                 user_ty: None,
                 const_: rustc_middle::mir::Const::Val(
-                    ConstValue::ZeroSized, 
+                    ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
                         DefId { index: DefIndex::from_u32(3219), krate: CrateNum::from_u32(2) },
@@ -889,7 +890,7 @@ fn add_into_raw_block<'tcx>(
                 span: dummy_span(),
                 user_ty: None,
                 const_: rustc_middle::mir::Const::Val(
-                    ConstValue::ZeroSized, 
+                    ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
                         DefId { index: DefIndex::from_u32(730), krate: CrateNum::from_u32(3) },
@@ -987,7 +988,7 @@ fn add_ptr_metadata_block<'tcx>(
                 span: dummy_span(),
                 user_ty: None,
                 const_: rustc_middle::mir::Const::Val(
-                    ConstValue::ZeroSized, 
+                    ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
                         DefId { index: DefIndex::from_u32(2452), krate: CrateNum::from_u32(2) },
@@ -1022,7 +1023,7 @@ fn add_raw_const_stmt<'tcx>(
         loc,
         Place { local: const_dyn_traitobj_loc, projection: empty_proj },
         Rvalue::RawPtr(
-            RawPtrKind::Const, 
+            RawPtrKind::Const,
             Place { local: dyn_traitobj_loc, projection: empty_proj },
         ),
     );
@@ -1042,7 +1043,6 @@ fn replace_term_ptrmetadata_call<'tcx>(
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
 
-
     let dyn_traitobj_tykind = make_dyn_traitobj_tykind(tcx, patch, traitobj_did);
     let dyn_traitobj_ty = tcx.mk_ty_from_kind(dyn_traitobj_tykind);
     let gen_args_ref = tcx.mk_args(&[GenericArg::from(dyn_traitobj_ty)]);
@@ -1059,7 +1059,7 @@ fn replace_term_ptrmetadata_call<'tcx>(
                 span: dummy_span(),
                 user_ty: None,
                 const_: rustc_middle::mir::Const::Val(
-                    ConstValue::ZeroSized, 
+                    ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
                         DefId { index: DefIndex::from_u32(2452), krate: CrateNum::from_u32(2) },
@@ -1323,8 +1323,8 @@ fn id_term<'tcx>(
                                     debug!("defid.index: {:?}", defid.index);
                                     debug!("defid.krate: {:?}", defid.krate);
                                     debug!("rawlist: {:?}", rawlist);
-                                    // TODO check expected type of 
-                                    // first parameter here (_not_ the 
+                                    // TODO check expected type of
+                                    // first parameter here (_not_ the
                                     // arg, which may happen to be dyn,
                                     // as we've seen in `into_raw()`)
                                     debug!("def_kind: {:?}", tcx.def_kind(defid));
@@ -1364,15 +1364,15 @@ fn id_term<'tcx>(
                     continue;
                 }
                 match &arg.node {
-                    Operand::Move(place) 
+                    Operand::Move(place)
                     | Operand::Copy(place) => {
                         debug!("ArgOp: Move/Copy");
                         let place_ty = place.ty(local_decls, tcx);
                         let deref = place_ty.ty.builtin_deref(false);
-                        // FIXME this check also admits static dispatch 
-                        // calls that simply happen to have a trait 
-                        // object as their first argument 
-                        // (e.g. Box::into_raw() takes in the trait 
+                        // FIXME this check also admits static dispatch
+                        // calls that simply happen to have a trait
+                        // object as their first argument
+                        // (e.g. Box::into_raw() takes in the trait
                         // object we want to convert into a raw ptr)
                         // TODO how else to differentiate?
                         if deref.is_some() && deref.unwrap().is_trait() {
@@ -1389,7 +1389,7 @@ fn id_term<'tcx>(
         },
         TerminatorKind::SwitchInt {
             discr: op,
-            targets: switchtargets, 
+            targets: switchtargets,
         } => {
             debug!("SwitchInt");
             debug!("discr: {:?}", op);
