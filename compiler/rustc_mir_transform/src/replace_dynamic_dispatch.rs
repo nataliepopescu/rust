@@ -13,8 +13,8 @@ use rustc_span::*;
 use rustc_span::source_map::Spanned;
 use rustc_span::def_id::*;
 
-use rustc_middle::ty::fast_reject::SimplifiedType;
-use std::ops::Index;
+//use rustc_middle::ty::fast_reject::SimplifiedType;
+//use std::ops::Index;
 
 use crate::patch::MirPatch;
 
@@ -72,14 +72,14 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
             id_ty(local_decl.ty);
         }
 
-        let loc1 = Location { block: BasicBlock::from_u32(14), statement_index: 4 };
-        let loc2 = Location { block: BasicBlock::from_u32(14), statement_index: 5 };
-        let old_bb_len = body.basic_blocks.len();
-        debug!("BBS LEN: {:?}", old_bb_len);
-        if old_bb_len > 14 {
-            debug!("STATEMENT BEFORE");
-            debug!("stmt: {:?}", body.stmt_at(loc1));
-        }
+        //let loc1 = Location { block: BasicBlock::from_u32(14), statement_index: 4 };
+        //let loc2 = Location { block: BasicBlock::from_u32(14), statement_index: 5 };
+        //let old_bb_len = body.basic_blocks.len();
+        //debug!("BBS LEN: {:?}", old_bb_len);
+        //if old_bb_len > 14 {
+        //    debug!("STATEMENT BEFORE");
+        //    debug!("stmt: {:?}", body.stmt_at(loc1));
+        //}
 
         debug!("RUN PASS");
         for (bb, data) in body.basic_blocks.iter_enumerated() {
@@ -109,20 +109,20 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
 
         patch.apply(body);
 
-        let new_bb_len = body.basic_blocks.len();
-        debug!("BBS LEN: {:?}", new_bb_len);
-        for (bb, data) in body.basic_blocks.iter_enumerated() {
-            if bb.as_usize() >= old_bb_len {
-                debug!("NEW BB: {:?}", bb.as_usize());
-                debug!("{:?}", data);
-            }
-        }
+        //let new_bb_len = body.basic_blocks.len();
+        //debug!("BBS LEN: {:?}", new_bb_len);
+        //for (bb, data) in body.basic_blocks.iter_enumerated() {
+        //    if bb.as_usize() >= old_bb_len {
+        //        debug!("NEW BB: {:?}", bb.as_usize());
+        //        debug!("{:?}", data);
+        //    }
+        //}
 
-        if old_bb_len > 14 {
-            debug!("STATEMENT AFTER");
-            debug!("stmt: {:?}", body.stmt_at(loc1));
-            //debug!("stmt: {:?}", body.stmt_at(loc2));
-        }
+        //if old_bb_len > 14 {
+        //    debug!("STATEMENT AFTER");
+        //    debug!("stmt: {:?}", body.stmt_at(loc1));
+        //    //debug!("stmt: {:?}", body.stmt_at(loc2));
+        //}
 
         //debug!("LOCALS AFTER ({:?})", body.local_decls().len());
         //for (idx, local_decl) in body.local_decls().iter_enumerated() {
@@ -170,6 +170,7 @@ fn replace_dynamic_dispatch<'tcx>(
         _ => panic!("trait is not Dynamic"),
     }
 
+    /*
     // get trait impl defids
     // alternatively, replace trait_impls_of() => all_impls()
     let nb_impls_dids = tcx.trait_impls_of(traitobj_did).non_blanket_impls();
@@ -198,10 +199,15 @@ fn replace_dynamic_dispatch<'tcx>(
     if !init {
         panic!("no assoc items!");
     }
+    */
 
     // try: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.vtable_entries
     // - could potentially replace our get_cat() and get_dog() fakes
 
+    let bb_cat_ptr_metadata = BasicBlock::from_u32(15); // actually bb_old_return
+    let bb_old_cleanup = BasicBlock::from_u32(21);
+
+    /*
     // get old terminator's edges
     let edges = data.terminator().kind.edges();
     let bb_old_return;
@@ -223,6 +229,7 @@ fn replace_dynamic_dispatch<'tcx>(
             panic!("verifopt: need to set terminator edges");
         }
     }
+    */
 
     // /////////////////////////
     // add locals
@@ -230,55 +237,56 @@ fn replace_dynamic_dispatch<'tcx>(
     // TODO all added locals are mutable... is this important post-borrowck?
     // if so, how to make immut?
 
-    // let _: std:ptr::DynMetadata<dyn Animal>;
+    // // let _: std:ptr::DynMetadata<dyn Animal>;
     let dynmetadata_animal_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // _21
-    let dynmetadata_cat_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24
-    //let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _27
+    // let dynmetadata_cat_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24
+    // //let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _27
 
-    // let mut: *const dyn Animal;
+    // // let mut: *const dyn Animal;
     let const_dyn_traitobj_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _22
-    let const_dyn_traitobj_cat_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _25
-    let const_dyn_traitobj_cat_loc2 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52
-    //let const_dyn_traitobj_dog_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _28
+    // let const_dyn_traitobj_cat_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _25
+    // let const_dyn_traitobj_cat_loc2 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52
+    // //let const_dyn_traitobj_dog_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _28
 
-    // let _: &dyn Animal;
-    let dyn_traitobj_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _23
-    let dyn_traitobj_cat_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _26
-    //let dyn_traitobj_dog_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _29
+    // // let _: &dyn Animal;
+    // let dyn_traitobj_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _23 - ERROR/REMOVE
+    // let dyn_traitobj_cat_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _26
+    // //let dyn_traitobj_dog_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _29
 
-    // let mut _: &std:ptr::DynMetadata<dyn Animal>;
-    let dynmetadata_animal_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _34, _42?
-    let dynmetadata_cat_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _35
-    //let dynmetadata_dog_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _43
+    // // let mut _: &std:ptr::DynMetadata<dyn Animal>;
+    // let dynmetadata_animal_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _34, _42?
+    // let dynmetadata_cat_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _35
+    // //let dynmetadata_dog_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _43
 
-    // let mut _: std::boxed::Box<dyn Animal>;
-    let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32
-    let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17
-    let boxed_dyn_traitobj_cat_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _19
-    //let boxed_dyn_traitobj_dog_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _20
+    // // let mut _: std::boxed::Box<dyn Animal>;
+    // let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32
+    // let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17
+    // let boxed_dyn_traitobj_cat_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _19
+    // //let boxed_dyn_traitobj_dog_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _20
 
-    // let _: *const ();
-    let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch); // _30
+    // // let _: *const ();
+    // let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch); // _30
 
-    // let mut _: *const ();
-    let raw_traitobj2_loc = add_raw_traitobj_temp(tcx, patch); // _38
+    // // let mut _: *const ();
+    // let raw_traitobj2_loc = add_raw_traitobj_temp(tcx, patch); // _38
 
-    // let mut _: *mut dyn Animal;
-    let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31
+    // // let mut _: *mut dyn Animal;
+    // let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31
 
-    // let _: ();
-    let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39
+    // // let _: ();
+    // let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39
 
-    // let _: &Cat;
-    let cat_loc = add_catref_temp(tcx, patch, *cat_did); // _37
+    // // let _: &Cat;
+    // let cat_loc = add_catref_temp(tcx, patch, *cat_did); // _37
 
-    // let mut _: bool;
-    let first_eq_res_loc = add_mut_bool_temp(tcx, patch); // _33
+    // // let mut _: bool;
+    // let first_eq_res_loc = add_mut_bool_temp(tcx, patch); // _33
 
     // /////////////////////////
     // add / modify blocks
     // /////////////////////////
 
+    /*
     let bb_cat_goto = add_cat_goto_block(tcx, patch, bb_old_return);
     let bb_cat_speak = add_cat_speak_block(tcx, patch, SpeakBlockVars::new(
         bb_cat_goto,
@@ -335,18 +343,27 @@ fn replace_dynamic_dispatch<'tcx>(
         dynmetadata_cat_loc,
         traitobj_did
     );
+    */
 
+    // TODO put in own func + make top-level empty_projs + dummy_spans
     // /////////////////////////
-    // replace old terminator (to dyn Animal::speak()) with:
+    // replace old dynamic dispatch call with:
     // - &raw const
     // - ptr_metadata call
     // /////////////////////////
+    // TODO add StorageDead(Place { local: Local::from_u32(21), projection: empty_proj }) statement in this block
+    //add_storage_dead(
+    //    tcx,
+    //    patch,
+    //    bb,
+    //    Local::from_u32(21)
+    //);
     add_raw_const_stmt(
         tcx,
         patch,
         bb,
         const_dyn_traitobj_loc,
-        dyn_traitobj_loc
+        //dyn_traitobj_loc
     );
     // FIXME this function is messing validation up
     replace_term_ptrmetadata_call(
@@ -1014,17 +1031,23 @@ fn add_raw_const_stmt<'tcx>(
     patch: &mut MirPatch<'tcx>,
     bb: BasicBlock,
     const_dyn_traitobj_loc: Local,
-    dyn_traitobj_loc: Local,
+    //dyn_traitobj_loc: Local,
 ) {
     let loc = Location { block: bb, statement_index: 4 };
+
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
+
+    let deref_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[ProjectionElem::Deref];
+    let deref_proj = tcx.mk_place_elems(deref_proj_slice);
+
     patch.add_assign(
         loc,
         Place { local: const_dyn_traitobj_loc, projection: empty_proj },
         Rvalue::RawPtr(
             RawPtrKind::Const,
-            Place { local: dyn_traitobj_loc, projection: empty_proj },
+            // FIXME brittle idx
+            Place { local: Local::from_u32(22), projection: deref_proj },
         ),
     );
 }
@@ -1266,9 +1289,14 @@ fn id_stmt<'tcx>(kind: &StatementKind<'tcx>) {
                     debug!("Ty: {:?}", ty);
                     id_ty(ty);
                 },
-                Rvalue::RawPtr(rawptrkind, _place) => {
+                Rvalue::RawPtr(rawptrkind, place) => {
                     debug!("RValue Kind: RawPtr");
                     debug!("RawPtrKind::{:?}", rawptrkind);
+                    debug!("place.local: {:?}", place.local);
+                    debug!("place.proj: {:?}", place.projection);
+                    if place.is_indirect_first_projection() {
+                        debug!("DEREF PROJECTION");
+                    }
                 },
                 _ => debug!("RValue Kind: another"),
             }
