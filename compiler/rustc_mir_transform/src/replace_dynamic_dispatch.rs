@@ -184,8 +184,7 @@ fn replace_dynamic_dispatch<'tcx>(
         }
     }
 
-    //let bb_first_compare = BasicBlock::from_u32(15); // actually bb_old_return
-    let bb_into_raw = bb_old_return;
+    let bb_first_compare = bb_old_return;
 
     // /////////////////////////
     // add locals
@@ -206,9 +205,9 @@ fn replace_dynamic_dispatch<'tcx>(
     let dynmetadata_cat_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24 target, _30 wip
 
     // locals for into_raw block
-    //let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31 target, _31 wip
-    //let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32 target, _31 wip
-    //let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17 target, _32 wip
+    let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31 target, _31 wip
+    let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32 target, _31 wip
+    //let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17 target
 
     // //let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _27
 
@@ -239,6 +238,8 @@ fn replace_dynamic_dispatch<'tcx>(
     // /////////////////////////
     // add / modify blocks
     // /////////////////////////
+
+    // TODO may not actually need to add backwards b/c can just calc bb index
 
     /*
     let bb_cat_goto = add_cat_goto_block(patch, bb_old_return);
@@ -274,7 +275,9 @@ fn replace_dynamic_dispatch<'tcx>(
         first_eq_res_loc,
         traitobj_did
     );
+    */
 
+    // TODO StorageDead ? -> "next" block
     let bb_into_raw = add_into_raw_block(
         tcx,
         patch,
@@ -282,15 +285,13 @@ fn replace_dynamic_dispatch<'tcx>(
         bb_old_cleanup,
         mut_dyn_traitobj_loc,
         boxed_dyn_traitobj_loc1,
-        boxed_dyn_traitobj_animal_loc,
+        Local::from_u32(17),
         traitobj_did,
         dyn_traitobj_cat_loc,
         const_dyn_traitobj_cat_loc2,
         const_dyn_traitobj_cat_loc3,
     );
-    */
 
-    // TODO StorageDead ? -> "next" block
     let bb_cat_ptr_metadata = add_ptr_metadata_block(
         tcx,
         patch,
@@ -803,7 +804,7 @@ fn add_into_raw_block<'tcx>(
         StatementKind::StorageLive(boxed_dyn_traitobj_animal_loc),
     ));
 
-    // TODO const false
+    // TODO const false ?
 
     stmts.push(Statement::new(
         dummy_source_info(),
