@@ -83,7 +83,8 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                             id_ty(ty);
                             if ty.is_trait() {
                                 debug!("ty: {:?}", ty);
-                                replace_dynamic_dispatch(tcx, &mut patch, ty, bb, data);
+                                let num_bbs = body.basic_blocks.len();
+                                replace_dynamic_dispatch(tcx, &mut patch, ty, bb, data, num_bbs);
                             }
                         }
                     }
@@ -106,6 +107,7 @@ fn replace_dynamic_dispatch<'tcx>(
     ty: Ty<'tcx>,
     bb: BasicBlock,
     data: &BasicBlockData<'tcx>,
+    num_bbs: usize,
 ) {
     debug!("-----REPLACE");
 
@@ -217,33 +219,91 @@ fn replace_dynamic_dispatch<'tcx>(
     let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39 target, _38 wip
     let cat_loc = add_catref_temp(tcx, patch, *cat_did); // _37 target, _39 wip
 
-    //let boxed_dyn_traitobj_cat_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _19 target
-    //let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17 target
-    // //let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _27
-    // let const_dyn_traitobj_cat_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _25
-    // //let const_dyn_traitobj_dog_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _28
-    // let dyn_traitobj_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _23 - ERROR/REMOVE
-    // //let dyn_traitobj_dog_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _29
-    // //let dynmetadata_dog_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _43
-    // //let boxed_dyn_traitobj_dog_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _20
-
     // /////////////////////////
     // add / modify blocks
     // /////////////////////////
 
-    // TODO may not actually need to add backwards b/c can just calc bb index
-    let bb_second_compare = bb_old_return;
-
-    let bb_cat_goto = add_cat_goto_block(
-        patch,
-        bb_old_return,
-        cat_loc,
-        empty_tup_loc,
-    );
-    let bb_cat_speak = add_cat_speak_block(
+    debug!("num_bbs: {:?}", num_bbs);
+    let bb_cat_ptr_metadata_exp = BasicBlock::from_usize(num_bbs);
+    modify_dyndispatch_block(
         tcx,
         patch,
-        bb_cat_goto,
+        traitobj_did,
+        bb,
+        data,
+        bb_cat_ptr_metadata_exp,
+        bb_old_cleanup,
+        dynmetadata_animal_loc,
+        const_dyn_traitobj_loc,
+    );
+
+    let bb_into_raw_exp = BasicBlock::from_usize(num_bbs + 1);
+    let bb_cat_ptr_metadata_act = add_ptr_metadata_block(
+        tcx,
+        patch,
+        bb_into_raw_exp,
+        bb_old_cleanup,
+        Local::from_u32(20),
+        dyn_traitobj_cat_loc,
+        const_dyn_traitobj_cat_loc2,
+        const_dyn_traitobj_cat_loc3,
+        dynmetadata_cat_loc,
+        traitobj_did,
+        const_dyn_traitobj_loc,
+    );
+    assert_eq!(bb_cat_ptr_metadata_exp, bb_cat_ptr_metadata_act);
+
+    let bb_first_compare_exp = BasicBlock::from_usize(num_bbs + 2);
+    let bb_into_raw_act = add_into_raw_block(
+        tcx,
+        patch,
+        bb_first_compare_exp,
+        bb_old_cleanup,
+        mut_dyn_traitobj_loc,
+        boxed_dyn_traitobj_loc1,
+        Local::from_u32(17),
+        traitobj_did,
+        dyn_traitobj_cat_loc,
+        const_dyn_traitobj_cat_loc2,
+        const_dyn_traitobj_cat_loc3,
+    );
+    assert_eq!(bb_into_raw_exp, bb_into_raw_act);
+
+    let bb_first_switch_exp = BasicBlock::from_usize(num_bbs + 3);
+    let bb_first_compare_act = add_first_compare_block(
+        tcx,
+        patch,
+        bb_first_switch_exp,
+        bb_old_cleanup,
+        raw_traitobj1_loc,
+        mut_dyn_traitobj_loc,
+        dynmetadata_animal_loc,
+        dynmetadata_animal_ref_loc,
+        dynmetadata_cat_loc,
+        dynmetadata_cat_ref_loc,
+        first_eq_res_loc,
+        traitobj_did,
+        boxed_dyn_traitobj_loc1,
+    );
+    assert_eq!(bb_first_compare_exp, bb_first_compare_act);
+
+    // FIXME remove when impl dog stuff
+    let bb_second_compare = bb_old_return;
+    let bb_cat_speak_exp = BasicBlock::from_usize(num_bbs + 4);
+    let bb_first_switch_act = add_first_switch_block(
+        tcx,
+        patch,
+        bb_cat_speak_exp,
+        bb_second_compare,
+        first_eq_res_loc
+    );
+    assert_eq!(bb_first_switch_exp, bb_first_switch_act);
+
+    let bb_cat_goto_exp = BasicBlock::from_usize(num_bbs + 5);
+    let bb_cat_speak_act = add_cat_speak_block(
+        tcx,
+        patch,
+        bb_cat_goto_exp,
         bb_old_cleanup,
         raw_traitobj1_loc,
         raw_traitobj2_loc,
@@ -256,69 +316,15 @@ fn replace_dynamic_dispatch<'tcx>(
         dynmetadata_cat_ref_loc,
         first_eq_res_loc,
     );
+    assert_eq!(bb_cat_speak_exp, bb_cat_speak_act);
 
-    let bb_first_switch = add_first_switch_block(
-        tcx,
+    let bb_cat_goto_act = add_cat_goto_block(
         patch,
-        bb_cat_speak,
-        bb_second_compare,
-        first_eq_res_loc
+        bb_old_return,
+        cat_loc,
+        empty_tup_loc,
     );
-    let bb_first_compare = add_first_compare_block(
-        tcx,
-        patch,
-        bb_first_switch,
-        bb_old_cleanup,
-        raw_traitobj1_loc,
-        mut_dyn_traitobj_loc,
-        dynmetadata_animal_loc,
-        dynmetadata_animal_ref_loc,
-        dynmetadata_cat_loc,
-        dynmetadata_cat_ref_loc,
-        first_eq_res_loc,
-        traitobj_did,
-        boxed_dyn_traitobj_loc1,
-    );
-
-    let bb_into_raw = add_into_raw_block(
-        tcx,
-        patch,
-        bb_first_compare,
-        bb_old_cleanup,
-        mut_dyn_traitobj_loc,
-        boxed_dyn_traitobj_loc1,
-        Local::from_u32(17),
-        traitobj_did,
-        dyn_traitobj_cat_loc,
-        const_dyn_traitobj_cat_loc2,
-        const_dyn_traitobj_cat_loc3,
-    );
-
-    let bb_cat_ptr_metadata = add_ptr_metadata_block(
-        tcx,
-        patch,
-        bb_into_raw,
-        bb_old_cleanup,
-        Local::from_u32(20),
-        dyn_traitobj_cat_loc,
-        const_dyn_traitobj_cat_loc2,
-        const_dyn_traitobj_cat_loc3,
-        dynmetadata_cat_loc,
-        traitobj_did,
-        const_dyn_traitobj_loc,
-    );
-
-    modify_dyndispatch_block(
-        tcx,
-        patch,
-        traitobj_did,
-        bb,
-        data,
-        bb_cat_ptr_metadata,
-        bb_old_cleanup,
-        dynmetadata_animal_loc,
-        const_dyn_traitobj_loc,
-    );
+    assert_eq!(bb_cat_goto_exp, bb_cat_goto_act);
 
     // ////////////////
 
