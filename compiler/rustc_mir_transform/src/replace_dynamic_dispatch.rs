@@ -21,6 +21,7 @@ use crate::patch::MirPatch;
 
 pub(super) struct ReplaceDynamicDispatch;
 
+/*
 struct SpeakBlockVars {
     bb_goto: BasicBlock,
     bb_cleanup: BasicBlock,
@@ -55,6 +56,7 @@ impl SpeakBlockVars {
         }
     }
 }
+*/
 
 impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -183,9 +185,6 @@ fn replace_dynamic_dispatch<'tcx>(
         }
     }
 
-    let bb_cat_goto = bb_old_return;
-    let bb_first_switch = bb_old_return;
-
     // /////////////////////////
     // add locals
     // /////////////////////////
@@ -199,7 +198,6 @@ fn replace_dynamic_dispatch<'tcx>(
 
     // locals for cat ptr::metadata block
     let dyn_traitobj_cat_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _26 target, _27 wip
-    //let boxed_dyn_traitobj_cat_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _19 target
     let const_dyn_traitobj_cat_loc2 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52 target, _28 wip
     let const_dyn_traitobj_cat_loc3 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52 target, _29 wip
     let dynmetadata_cat_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24 target, _30 wip
@@ -207,7 +205,6 @@ fn replace_dynamic_dispatch<'tcx>(
     // locals for into_raw block
     let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31 target, _31 wip
     let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32 target, _32 wip
-    //let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17 target
 
     // locals for first_compare block
     let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch); // _30 target, _33 wip
@@ -220,16 +217,14 @@ fn replace_dynamic_dispatch<'tcx>(
     let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39 target, _38 wip
     let cat_loc = add_catref_temp(tcx, patch, *cat_did); // _37 target, _39 wip
 
+    //let boxed_dyn_traitobj_cat_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _19 target
+    //let boxed_dyn_traitobj_animal_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _17 target
     // //let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _27
-
     // let const_dyn_traitobj_cat_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _25
     // //let const_dyn_traitobj_dog_loc = add_const_dyn_traitobj_temp(tcx, patch, ty); // _28
-
     // let dyn_traitobj_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _23 - ERROR/REMOVE
     // //let dyn_traitobj_dog_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _29
-
     // //let dynmetadata_dog_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _43
-
     // //let boxed_dyn_traitobj_dog_loc = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _20
 
     // /////////////////////////
@@ -237,30 +232,31 @@ fn replace_dynamic_dispatch<'tcx>(
     // /////////////////////////
 
     // TODO may not actually need to add backwards b/c can just calc bb index
+    let bb_second_compare = bb_old_return;
 
-    /*
-    let bb_cat_goto = add_cat_goto_block(patch, bb_old_return);
-    */
-    let _bb_cat_speak = add_cat_speak_block(
+    let bb_cat_goto = add_cat_goto_block(
+        patch,
+        bb_old_return,
+        cat_loc,
+        empty_tup_loc,
+    );
+    let bb_cat_speak = add_cat_speak_block(
         tcx,
         patch,
-        SpeakBlockVars::new(
-            bb_cat_goto,
-            bb_old_cleanup,
-            raw_traitobj1_loc,
-            raw_traitobj2_loc,
-            empty_tup_loc,
-            cat_loc,
-            *cat_did,
-            cat_speak_did,
-        ),
+        bb_cat_goto,
+        bb_old_cleanup,
+        raw_traitobj1_loc,
+        raw_traitobj2_loc,
+        empty_tup_loc,
+        cat_loc,
+        *cat_did,
+        cat_speak_did,
         raw_traitobj1_loc,
         dynmetadata_animal_ref_loc,
         dynmetadata_cat_ref_loc,
         first_eq_res_loc,
     );
 
-    /*
     let bb_first_switch = add_first_switch_block(
         tcx,
         patch,
@@ -268,7 +264,6 @@ fn replace_dynamic_dispatch<'tcx>(
         bb_second_compare,
         first_eq_res_loc
     );
-    */
     let bb_first_compare = add_first_compare_block(
         tcx,
         patch,
@@ -526,14 +521,23 @@ fn add_mut_bool_temp<'tcx>(tcx: TyCtxt<'tcx>, patch: &mut MirPatch<'tcx>) -> Loc
     patch.new_temp(tcx.mk_ty_from_kind(crate::ty::Bool), dummy_span())
 }
 
-fn add_cat_goto_block<'tcx>(patch: &mut MirPatch<'tcx>, bb_return: BasicBlock) -> BasicBlock {
+fn add_cat_goto_block<'tcx>(
+    patch: &mut MirPatch<'tcx>,
+    bb_return: BasicBlock,
+    free1: Local,
+    free2: Local,
+) -> BasicBlock {
+    let mut stmts = Vec::new();
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free1)));
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free2)));
+
     // construct terminator
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::Goto { target: bb_return },
     };
 
-    let bb_data = BasicBlockData::new(Some(term), false);
+    let bb_data = BasicBlockData::new_stmts(stmts, Some(term), false);
     // if statements, use BBD::new_stmts()
     patch.new_block(bb_data)
 }
@@ -541,7 +545,14 @@ fn add_cat_goto_block<'tcx>(patch: &mut MirPatch<'tcx>, bb_return: BasicBlock) -
 fn add_cat_speak_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
-    sbv: SpeakBlockVars,
+    bb_goto: BasicBlock,
+    bb_cleanup: BasicBlock,
+    raw_traitobj1_loc: Local,
+    raw_traitobj2_loc: Local,
+    empty_tup_loc: Local,
+    concrete_ty_loc: Local,
+    concrete_ty_did: DefId,
+    speak_fn_did: DefId,
     free1: Local,
     free2: Local,
     free3: Local,
@@ -575,36 +586,36 @@ fn add_cat_speak_block<'tcx>(
 
     stmts.push(Statement::new(
         dummy_source_info(),
-        StatementKind::StorageLive(sbv.raw_traitobj2_loc),
+        StatementKind::StorageLive(raw_traitobj2_loc),
     ));
     stmts
-        .push(Statement::new(dummy_source_info(), StatementKind::StorageLive(sbv.concrete_ty_loc)));
-    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(sbv.empty_tup_loc)));
+        .push(Statement::new(dummy_source_info(), StatementKind::StorageLive(concrete_ty_loc)));
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(empty_tup_loc)));
 
     // copy raw_animal ptr
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
-            Place { local: sbv.raw_traitobj2_loc, projection: empty_proj },
+            Place { local: raw_traitobj2_loc, projection: empty_proj },
             Rvalue::Use(Operand::Copy(Place {
-                local: sbv.raw_traitobj1_loc,
+                local: raw_traitobj1_loc,
                 projection: empty_proj,
             })),
         ))),
     ));
 
     // transmute raw_animal copy into &Cat
-    let cat_adt_def = tcx.adt_def(sbv.concrete_ty_did);
+    let cat_adt_def = tcx.adt_def(concrete_ty_did);
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
 
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
-            Place { local: sbv.concrete_ty_loc, projection: empty_proj },
+            Place { local: concrete_ty_loc, projection: empty_proj },
             Rvalue::Cast(
                 CastKind::Transmute,
-                Operand::Move(Place { local: sbv.raw_traitobj2_loc, projection: empty_proj }),
+                Operand::Move(Place { local: raw_traitobj2_loc, projection: empty_proj }),
                 Ty::new_ref(
                     tcx,
                     Region::new_from_kind(tcx, RegionKind::ReErased),
@@ -617,11 +628,11 @@ fn add_cat_speak_block<'tcx>(
 
     stmts.push(Statement::new(
         dummy_source_info(),
-        StatementKind::StorageDead(sbv.raw_traitobj1_loc),
+        StatementKind::StorageDead(raw_traitobj1_loc),
     ));
     stmts.push(Statement::new(
         dummy_source_info(),
-        StatementKind::StorageDead(sbv.raw_traitobj2_loc),
+        StatementKind::StorageDead(raw_traitobj2_loc),
     ));
 
     // why &*s? try just using result of prev as speak arg
@@ -631,7 +642,7 @@ fn add_cat_speak_block<'tcx>(
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
 
     let args: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
-        node: Operand::Move(Place { local: sbv.concrete_ty_loc, projection: empty_proj }),
+        node: Operand::Move(Place { local: concrete_ty_loc, projection: empty_proj }),
         span: dummy_span(),
     }]);
 
@@ -646,13 +657,13 @@ fn add_cat_speak_block<'tcx>(
                 user_ty: None,
                 const_: rustc_middle::mir::Const::Val(
                     ConstValue::ZeroSized,
-                    Ty::new_fn_def(tcx, sbv.speak_fn_did, gen_args_ref),
+                    Ty::new_fn_def(tcx, speak_fn_did, gen_args_ref),
                 ),
             })),
             args,
-            destination: Place { local: sbv.empty_tup_loc, projection: empty_proj },
-            target: Some(sbv.bb_goto),
-            unwind: UnwindAction::Cleanup(sbv.bb_cleanup),
+            destination: Place { local: empty_tup_loc, projection: empty_proj },
+            target: Some(bb_goto),
+            unwind: UnwindAction::Cleanup(bb_cleanup),
             call_source: CallSource::Normal,
             fn_span: dummy_span(),
         },
