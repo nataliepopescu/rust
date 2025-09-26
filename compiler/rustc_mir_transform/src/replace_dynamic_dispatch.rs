@@ -128,22 +128,25 @@ fn replace_dynamic_dispatch<'tcx>(
 
     // get trait impl defids
     // alternatively, replace trait_impls_of() => all_impls()
-    let nb_impls_dids = tcx.trait_impls_of(traitobj_did).non_blanket_impls();
+    let impls = tcx.trait_impls_of(traitobj_did);
+    let blanket_impls_dids = impls.blanket_impls();
+    let nb_impls_dids = impls.non_blanket_impls();
     let impls_keys: Vec<_> = nb_impls_dids.keys().collect();
     let impls_vals: Vec<_> = nb_impls_dids.values().collect();
+    debug!("blanket dids: {:?}", blanket_impls_dids);
     debug!("non-blanket dids: {:?}", nb_impls_dids);
     debug!("impls_keys: {:?}", impls_keys);
     debug!("impls_values: {:?}", impls_vals);
 
     debug!("CAT DIDS");
     let (cat_did, cat_speak_did) =
-        get_dids(tcx, impls_keys.get(1).unwrap(), impls_vals.get(1).unwrap().as_slice()[0]);
+        get_dids(tcx, impls_keys.get(0).unwrap(), impls_vals.get(0).unwrap().as_slice()[0]);
     debug!("cat_did: {:?}", cat_did);
     debug!("cat_speak_did: {:?}", cat_speak_did);
 
     debug!("DOG DIDS");
     let (dog_did, dog_speak_did) =
-        get_dids(tcx, impls_keys.get(2).unwrap(), impls_vals.get(2).unwrap().as_slice()[0]);
+        get_dids(tcx, impls_keys.get(1).unwrap(), impls_vals.get(1).unwrap().as_slice()[0]);
     debug!("dog_did: {:?}", dog_did);
     debug!("dog_speak_did: {:?}", dog_speak_did);
 
@@ -151,6 +154,24 @@ fn replace_dynamic_dispatch<'tcx>(
 
     // try: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.vtable_entries
     // - could potentially replace our get_cat() and get_dog() fakes
+    //
+    // _22 == &dyn Animal (arg to old dynamic speak() call)
+
+    let cat_trait_ref = tcx.impl_trait_ref(impls_vals.get(0).unwrap().as_slice()[0]).unwrap().skip_binder();
+    let dog_trait_ref = tcx.impl_trait_ref(impls_vals.get(1).unwrap().as_slice()[0]).unwrap().skip_binder();
+    debug!("cat trait_ref: {:?}", cat_trait_ref);
+    debug!("dog trait_ref: {:?}", dog_trait_ref);
+    let cat_vtable_entries = tcx.vtable_entries(cat_trait_ref);
+    let dog_vtable_entries = tcx.vtable_entries(dog_trait_ref);
+    debug!("cat vtable_entries: {:?}", cat_vtable_entries);
+    debug!("dog vtable_entries: {:?}", dog_vtable_entries);
+    match cat_vtable_entries[3] {
+        VtblEntry::Method(inst) => {
+            debug!("inst.def: {:?}", inst.def);
+            debug!("inst.args: {:?}", inst.args);
+        }
+        _ => debug!("another"),
+    }
 
     // /////////////////////////
 
@@ -208,8 +229,9 @@ fn replace_dynamic_dispatch<'tcx>(
     // ptr::metadata blocks
     // /////////////////////////
 
-    // FIXME
-    //struct PMLocals {
+    // FIXME remove if can get vtable ptrs another way
+
+    //struct PtrMetadataBlockLocals {
     //    dyn_traitobj: Local,
     //    const_dyn_traitobj_1: Local,
     //    const_dyn_traitobj_2: Local,
