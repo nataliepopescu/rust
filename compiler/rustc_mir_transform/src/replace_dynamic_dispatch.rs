@@ -4,10 +4,11 @@
 #![allow(dead_code)]
 //#![allow(unused_variables)]
 
-use std::ops::Index;
+//use std::ops::Index;
+
+// FIXME precise imports
 
 use rustc_abi::FieldIdx;
-// FIXME precise imports
 //use rustc_middle::mir::{Statement, Terminator, StatementKind, TerminatorKind, Operand, CastKind, Rvalue, BinOp, PlaceElem, PlaceRef, Place, UnwindAction, CallSource, ConstOperand, ConstValue, Local, ProjectionElem, BasicBlock, BasicBlockData, RawPtrKind, Location, SwitchTargets, SourceInfo, SourceScope, Body, TerminatorEdges};
 use rustc_middle::mir::*;
 use rustc_middle::ty::fast_reject::SimplifiedType;
@@ -20,43 +21,6 @@ use tracing::debug;
 use crate::patch::MirPatch;
 
 pub(super) struct ReplaceDynamicDispatch;
-
-/*
-struct SpeakBlockVars {
-    bb_goto: BasicBlock,
-    bb_cleanup: BasicBlock,
-    raw_traitobj1_loc: Local,
-    raw_traitobj2_loc: Local,
-    empty_tup_loc: Local,
-    concrete_ty_loc: Local,
-    concrete_ty_did: DefId,
-    speak_fn_did: DefId,
-}
-
-impl SpeakBlockVars {
-    fn new(
-        bb_goto: BasicBlock,
-        bb_cleanup: BasicBlock,
-        raw_traitobj1_loc: Local,
-        raw_traitobj2_loc: Local,
-        empty_tup_loc: Local,
-        concrete_ty_loc: Local,
-        concrete_ty_did: DefId,
-        speak_fn_did: DefId,
-    ) -> Self {
-        SpeakBlockVars {
-            bb_goto,
-            bb_cleanup,
-            raw_traitobj1_loc,
-            raw_traitobj2_loc,
-            empty_tup_loc,
-            concrete_ty_loc,
-            concrete_ty_did,
-            speak_fn_did,
-        }
-    }
-}
-*/
 
 impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -101,6 +65,35 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     }
 }
 
+fn get_dids<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    simplified_ty: &SimplifiedType,
+    assoc_items_did: DefId,
+) -> (DefId, DefId) {
+    let ty_did;
+    match simplified_ty {
+        SimplifiedType::Adt(inner_did) => ty_did = inner_did,
+        _ => panic!("impl is not Adt"),
+    }
+
+    // dummy init value b/c the compiler thinks we can
+    // proceed with an uninit value despite the `init` flag
+    let mut init = false;
+    // FIXME
+    let mut fn_did = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
+    for assoc_item in tcx.associated_items(assoc_items_did).in_definition_order() {
+        debug!("assoc_item: {:?}", assoc_item);
+        debug!("assoc_item.def_id: {:?}", assoc_item.def_id);
+        fn_did = assoc_item.def_id;
+        init = true;
+    }
+    if !init {
+        panic!("no assoc items!");
+    }
+
+    (*ty_did, fn_did)
+}
+
 fn replace_dynamic_dispatch<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
@@ -136,34 +129,30 @@ fn replace_dynamic_dispatch<'tcx>(
     // get trait impl defids
     // alternatively, replace trait_impls_of() => all_impls()
     let nb_impls_dids = tcx.trait_impls_of(traitobj_did).non_blanket_impls();
+    let impls_keys: Vec<_> = nb_impls_dids.keys().collect();
+    let impls_vals: Vec<_> = nb_impls_dids.values().collect();
     debug!("non-blanket dids: {:?}", nb_impls_dids);
-    let impls_keys = nb_impls_dids.keys();
-    let mut impls_vals = nb_impls_dids.values();
+    debug!("impls_keys: {:?}", impls_keys);
+    debug!("impls_values: {:?}", impls_vals);
 
-    let cat_did;
-    let cat_simp = impls_keys.index(1);
-    match cat_simp {
-        SimplifiedType::Adt(did) => cat_did = did,
-        _ => panic!("impl is not Adt"),
-    }
+    debug!("CAT DIDS");
+    let (cat_did, cat_speak_did) =
+        get_dids(tcx, impls_keys.get(1).unwrap(), impls_vals.get(1).unwrap().as_slice()[0]);
+    debug!("cat_did: {:?}", cat_did);
+    debug!("cat_speak_did: {:?}", cat_speak_did);
 
-    let cat_did_for_assoc_items = impls_vals.nth(1).unwrap().as_slice()[0];
-    debug!("cat_did_for_assoc_items: {:?}", cat_did_for_assoc_items);
+    debug!("DOG DIDS");
+    let (dog_did, dog_speak_did) =
+        get_dids(tcx, impls_keys.get(2).unwrap(), impls_vals.get(2).unwrap().as_slice()[0]);
+    debug!("dog_did: {:?}", dog_did);
+    debug!("dog_speak_did: {:?}", dog_speak_did);
 
-    // dummy init value b/c the compiler thinks we can
-    // proceed with an uninit value despite the `init` flag
-    let mut cat_speak_did = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
-    let mut init = false;
-    for assoc_item in tcx.associated_items(cat_did_for_assoc_items).in_definition_order() {
-        cat_speak_did = assoc_item.def_id;
-        init = true;
-    }
-    if !init {
-        panic!("no assoc items!");
-    }
+    // /////////////////////////
 
     // try: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.vtable_entries
     // - could potentially replace our get_cat() and get_dog() fakes
+
+    // /////////////////////////
 
     // get old terminator's edges
     let edges = data.terminator().kind.edges();
@@ -204,26 +193,44 @@ fn replace_dynamic_dispatch<'tcx>(
     let const_dyn_traitobj_cat_loc3 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52 target, _29 wip
     let dynmetadata_cat_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24 target, _30 wip
 
+    // locals for dog ptr::metadata block
+    let dyn_traitobj_dog_loc = add_dyn_traitobj_temp(tcx, patch, ty); // _26 target, _31 wip
+    let const_dyn_traitobj_dog_loc2 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52 target, _32 wip
+    let const_dyn_traitobj_dog_loc3 = add_const_dyn_traitobj_temp(tcx, patch, ty); // _52 target, _33 wip
+    let dynmetadata_dog_loc = add_dynmetadata_temp(tcx, patch, traitobj_did); // (tbd) _24 target, _34 wip
+
     // locals for into_raw block
-    let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31 target, _31 wip
-    let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32 target, _32 wip
+    let mut_dyn_traitobj_loc = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did); // _31 target, _35 wip
+    let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did); // _32 target, _36 wip
 
     // locals for first_compare block
-    let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch); // _30 target, _33 wip
-    let dynmetadata_animal_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _34, _42? target, _34 wip
-    let dynmetadata_cat_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _35 target, _35 wip
-    let first_eq_res_loc = add_mut_bool_temp(tcx, patch); // _33 target, _36 wip
+    let raw_traitobj1_loc = add_raw_traitobj_temp(tcx, patch); // _30 target, _37 wip
+    let dynmetadata_animal_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _34, _42? target, _38 wip
+    let dynmetadata_cat_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _35 target, _39 wip
+    let first_eq_res_loc = add_mut_bool_temp(tcx, patch); // _33 target, _40 wip
+
+    // locals for second_compare block
+    let raw_traitobj3_loc = add_raw_traitobj_temp(tcx, patch); // _30 target, _41 wip
+    let dynmetadata_dog_ref_loc = add_dynmetadata_ref_temp(tcx, patch, traitobj_did); // _35 target, _42 wip
+    let second_eq_res_loc = add_mut_bool_temp(tcx, patch); // _33 target, _43 wip
 
     // locals for cat speak block
-    let raw_traitobj2_loc = add_raw_traitobj_temp(tcx, patch); // _38 target, _37 wip
-    let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39 target, _38 wip
-    let cat_loc = add_catref_temp(tcx, patch, *cat_did); // _37 target, _39 wip
+    let raw_traitobj2_loc = add_raw_traitobj_temp(tcx, patch); // _38 target, _44 wip
+    let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39 target, _45 wip
+    let cat_loc = add_concretety_ref_temp(tcx, patch, cat_did); // _37 target, _46 wip
+
+    // locals for dog speak block
+    let raw_traitobj4_loc = add_raw_traitobj_temp(tcx, patch); // _38 target, _47 wip
+    //let empty_tup_loc = add_emptytup_temp(tcx, patch); // _39 target, _48 wip
+    let dog_loc = add_concretety_ref_temp(tcx, patch, dog_did); // _37 target, _49 wip
 
     // /////////////////////////
     // add / modify blocks
     // /////////////////////////
 
     debug!("num_bbs: {:?}", num_bbs);
+
+    // mod dyn dispatch block
     let bb_cat_ptr_metadata_exp = BasicBlock::from_usize(num_bbs);
     modify_dyndispatch_block(
         tcx,
@@ -237,13 +244,14 @@ fn replace_dynamic_dispatch<'tcx>(
         const_dyn_traitobj_loc,
     );
 
-    let bb_into_raw_exp = BasicBlock::from_usize(num_bbs + 1);
+    // cat ptr::metadata block
+    let bb_dog_ptr_metadata_exp = BasicBlock::from_usize(num_bbs + 1);
     let bb_cat_ptr_metadata_act = add_ptr_metadata_block(
         tcx,
         patch,
-        bb_into_raw_exp,
+        bb_dog_ptr_metadata_exp,
         bb_old_cleanup,
-        Local::from_u32(20),
+        Local::from_u32(19),
         dyn_traitobj_cat_loc,
         const_dyn_traitobj_cat_loc2,
         const_dyn_traitobj_cat_loc3,
@@ -253,7 +261,25 @@ fn replace_dynamic_dispatch<'tcx>(
     );
     assert_eq!(bb_cat_ptr_metadata_exp, bb_cat_ptr_metadata_act);
 
-    let bb_first_compare_exp = BasicBlock::from_usize(num_bbs + 2);
+    // dog ptr::metadata block
+    let bb_into_raw_exp = BasicBlock::from_usize(num_bbs + 2);
+    let bb_dog_ptr_metadata_act = add_ptr_metadata_block(
+        tcx,
+        patch,
+        bb_into_raw_exp,
+        bb_old_cleanup,
+        Local::from_u32(20),
+        dyn_traitobj_dog_loc,
+        const_dyn_traitobj_dog_loc2,
+        const_dyn_traitobj_dog_loc3,
+        dynmetadata_dog_loc,
+        traitobj_did,
+        const_dyn_traitobj_loc,
+    );
+    assert_eq!(bb_dog_ptr_metadata_exp, bb_dog_ptr_metadata_act);
+
+    // animal into_raw() block
+    let bb_first_compare_exp = BasicBlock::from_usize(num_bbs + 3);
     let bb_into_raw_act = add_into_raw_block(
         tcx,
         patch,
@@ -269,8 +295,9 @@ fn replace_dynamic_dispatch<'tcx>(
     );
     assert_eq!(bb_into_raw_exp, bb_into_raw_act);
 
-    let bb_first_switch_exp = BasicBlock::from_usize(num_bbs + 3);
-    let bb_first_compare_act = add_first_compare_block(
+    // compare animal w cat vtable address
+    let bb_first_switch_exp = BasicBlock::from_usize(num_bbs + 4);
+    let bb_first_compare_act = add_compare_vtable_block(
         tcx,
         patch,
         bb_first_switch_exp,
@@ -287,20 +314,16 @@ fn replace_dynamic_dispatch<'tcx>(
     );
     assert_eq!(bb_first_compare_exp, bb_first_compare_act);
 
-    // FIXME remove when impl dog stuff
-    let bb_second_compare = bb_old_return;
-    let bb_cat_speak_exp = BasicBlock::from_usize(num_bbs + 4);
-    let bb_first_switch_act = add_first_switch_block(
-        tcx,
-        patch,
-        bb_cat_speak_exp,
-        bb_second_compare,
-        first_eq_res_loc
-    );
+    // first switch statement
+    let bb_second_compare_exp = BasicBlock::from_usize(num_bbs + 7);
+    let bb_cat_speak_exp = BasicBlock::from_usize(num_bbs + 5);
+    let bb_first_switch_act =
+        add_switch_block(tcx, patch, bb_cat_speak_exp, bb_second_compare_exp, first_eq_res_loc);
     assert_eq!(bb_first_switch_exp, bb_first_switch_act);
 
-    let bb_cat_goto_exp = BasicBlock::from_usize(num_bbs + 5);
-    let bb_cat_speak_act = add_cat_speak_block(
+    // cat speak block
+    let bb_cat_goto_exp = BasicBlock::from_usize(num_bbs + 6);
+    let bb_cat_speak_act = add_speak_block(
         tcx,
         patch,
         bb_cat_goto_exp,
@@ -309,7 +332,7 @@ fn replace_dynamic_dispatch<'tcx>(
         raw_traitobj2_loc,
         empty_tup_loc,
         cat_loc,
-        *cat_did,
+        cat_did,
         cat_speak_did,
         raw_traitobj1_loc,
         dynmetadata_animal_ref_loc,
@@ -318,40 +341,61 @@ fn replace_dynamic_dispatch<'tcx>(
     );
     assert_eq!(bb_cat_speak_exp, bb_cat_speak_act);
 
-    let bb_cat_goto_act = add_cat_goto_block(
-        patch,
-        bb_old_return,
-        cat_loc,
-        empty_tup_loc,
-    );
+    // cat goto block
+    let bb_cat_goto_act = add_goto_block(patch, bb_old_return, cat_loc, empty_tup_loc);
     assert_eq!(bb_cat_goto_exp, bb_cat_goto_act);
 
-    // ////////////////
+    // compare animal w dog vtable address
+    let bb_second_switch_exp = BasicBlock::from_usize(num_bbs + 8);
+    let bb_second_compare_act = add_compare_vtable_block(
+        tcx,
+        patch,
+        bb_second_switch_exp,
+        bb_old_cleanup,
+        raw_traitobj3_loc,
+        mut_dyn_traitobj_loc,
+        dynmetadata_animal_loc,
+        dynmetadata_animal_ref_loc,
+        dynmetadata_dog_loc,
+        dynmetadata_dog_ref_loc,
+        second_eq_res_loc,
+        traitobj_did,
+        boxed_dyn_traitobj_loc1,
+    );
+    assert_eq!(bb_second_compare_exp, bb_second_compare_act);
+
+    // second switch statement
+    let bb_dog_speak_exp = BasicBlock::from_usize(num_bbs + 9);
+    let bb_second_switch_act =
+        add_switch_block(tcx, patch, bb_dog_speak_exp, bb_old_return, second_eq_res_loc);
+    assert_eq!(bb_second_switch_exp, bb_second_switch_act);
+
+    // dog speak block
+    let bb_dog_goto_exp = BasicBlock::from_usize(num_bbs + 10);
+    let bb_dog_speak_act = add_speak_block(
+        tcx,
+        patch,
+        bb_dog_goto_exp,
+        bb_old_cleanup,
+        raw_traitobj1_loc,
+        raw_traitobj4_loc,
+        empty_tup_loc,
+        dog_loc,
+        dog_did,
+        dog_speak_did,
+        raw_traitobj1_loc,
+        dynmetadata_animal_ref_loc,
+        dynmetadata_dog_ref_loc,
+        second_eq_res_loc,
+    );
+    assert_eq!(bb_dog_speak_exp, bb_dog_speak_act);
+
+    // dog goto block
+    let bb_dog_goto_act = add_goto_block(patch, bb_old_return, dog_loc, empty_tup_loc);
+    assert_eq!(bb_dog_goto_exp, bb_dog_goto_act);
 
     // /////////////////////////
-    // add block (dog goto) ? - like cat goto
-    // /////////////////////////
-
-    // /////////////////////////
-    // add block (dog speak) - like cat speak
-    // /////////////////////////
-
-    // /////////////////////////
-    // add block (second switch) - like first switch
-    // /////////////////////////
-
-    // /////////////////////////
-    // add block (second compare) - like first compare
-    // /////////////////////////
-
-    // /////////////////////////
-    // add block (dog ptr_metadata) - same as cat
-    // /////////////////////////
-
-    // ////////////////
-
-    // /////////////////////////
-    // make sure cleanup funnels to the same place
+    // TODO make sure cleanup funnels to the same place
     // /////////////////////////
 }
 
@@ -504,8 +548,14 @@ fn add_emptytup_temp<'tcx>(tcx: TyCtxt<'tcx>, patch: &mut MirPatch<'tcx>) -> Loc
 
 /*
  * let _: &Cat;
+ * or
+ * let _: &Dog;
  */
-fn add_catref_temp<'tcx>(tcx: TyCtxt<'tcx>, patch: &mut MirPatch<'tcx>, cat_did: DefId) -> Local {
+fn add_concretety_ref_temp<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    cat_did: DefId,
+) -> Local {
     let cat_adt_def = tcx.adt_def(cat_did);
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
@@ -527,7 +577,7 @@ fn add_mut_bool_temp<'tcx>(tcx: TyCtxt<'tcx>, patch: &mut MirPatch<'tcx>) -> Loc
     patch.new_temp(tcx.mk_ty_from_kind(crate::ty::Bool), dummy_span())
 }
 
-fn add_cat_goto_block<'tcx>(
+fn add_goto_block<'tcx>(
     patch: &mut MirPatch<'tcx>,
     bb_return: BasicBlock,
     free1: Local,
@@ -548,7 +598,7 @@ fn add_cat_goto_block<'tcx>(
     patch.new_block(bb_data)
 }
 
-fn add_cat_speak_block<'tcx>(
+fn add_speak_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
     bb_goto: BasicBlock,
@@ -590,12 +640,8 @@ fn add_cat_speak_block<'tcx>(
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free3)));
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free4)));
 
-    stmts.push(Statement::new(
-        dummy_source_info(),
-        StatementKind::StorageLive(raw_traitobj2_loc),
-    ));
-    stmts
-        .push(Statement::new(dummy_source_info(), StatementKind::StorageLive(concrete_ty_loc)));
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(raw_traitobj2_loc)));
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(concrete_ty_loc)));
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(empty_tup_loc)));
 
     // copy raw_animal ptr
@@ -603,10 +649,7 @@ fn add_cat_speak_block<'tcx>(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
             Place { local: raw_traitobj2_loc, projection: empty_proj },
-            Rvalue::Use(Operand::Copy(Place {
-                local: raw_traitobj1_loc,
-                projection: empty_proj,
-            })),
+            Rvalue::Use(Operand::Copy(Place { local: raw_traitobj1_loc, projection: empty_proj })),
         ))),
     ));
 
@@ -632,14 +675,8 @@ fn add_cat_speak_block<'tcx>(
         ))),
     ));
 
-    stmts.push(Statement::new(
-        dummy_source_info(),
-        StatementKind::StorageDead(raw_traitobj1_loc),
-    ));
-    stmts.push(Statement::new(
-        dummy_source_info(),
-        StatementKind::StorageDead(raw_traitobj2_loc),
-    ));
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(raw_traitobj1_loc)));
+    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(raw_traitobj2_loc)));
 
     // why &*s? try just using result of prev as speak arg
 
@@ -679,23 +716,23 @@ fn add_cat_speak_block<'tcx>(
     patch.new_block(bb_data)
 }
 
-fn add_first_switch_block<'tcx>(
+fn add_switch_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
-    bb_speak: BasicBlock,
-    bb_cleanup: BasicBlock,
+    bb_eq: BasicBlock,
+    bb_neq: BasicBlock,
     eq_res_loc: Local,
 ) -> BasicBlock {
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
     let empty_proj = tcx.mk_place_elems(empty_proj_slice);
 
-    let targets = vec![(0u128, bb_speak)].into_iter();
+    let targets = vec![(0u128, bb_neq)].into_iter();
 
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::SwitchInt {
             discr: Operand::Move(Place { local: eq_res_loc, projection: empty_proj }),
-            targets: SwitchTargets::new(targets, bb_cleanup),
+            targets: SwitchTargets::new(targets, bb_eq),
         },
     };
 
@@ -703,7 +740,7 @@ fn add_first_switch_block<'tcx>(
     patch.new_block(bb_data)
 }
 
-fn add_first_compare_block<'tcx>(
+fn add_compare_vtable_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
     bb_first_switch: BasicBlock,
