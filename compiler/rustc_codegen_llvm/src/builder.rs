@@ -2,6 +2,7 @@ use std::borrow::{Borrow, Cow};
 use std::ops::Deref;
 use std::{iter, ptr};
 
+use rustc_ast::expand::typetree::FncTree;
 pub(crate) mod autodiff;
 pub(crate) mod gpu_offload;
 
@@ -1091,16 +1092,11 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         ty: Ty<'tcx>,
         lhs: Self::Value,
         rhs: Self::Value,
-    ) -> Option<Self::Value> {
-        // FIXME: See comment on the definition of `three_way_compare`.
-        if crate::llvm_util::get_version() < (20, 0, 0) {
-            return None;
-        }
-
+    ) -> Self::Value {
         let size = ty.primitive_size(self.tcx);
         let name = if ty.is_signed() { "llvm.scmp" } else { "llvm.ucmp" };
 
-        Some(self.call_intrinsic(name, &[self.type_i8(), self.type_ix(size.bits())], &[lhs, rhs]))
+        self.call_intrinsic(name, &[self.type_i8(), self.type_ix(size.bits())], &[lhs, rhs])
     }
 
     /* Miscellaneous instructions */
@@ -1112,11 +1108,12 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         src_align: Align,
         size: &'ll Value,
         flags: MemFlags,
+        tt: Option<FncTree>,
     ) {
         assert!(!flags.contains(MemFlags::NONTEMPORAL), "non-temporal memcpy not supported");
         let size = self.intcast(size, self.type_isize(), false);
         let is_volatile = flags.contains(MemFlags::VOLATILE);
-        unsafe {
+        let memcpy = unsafe {
             llvm::LLVMRustBuildMemCpy(
                 self.llbuilder,
                 dst,
@@ -1125,7 +1122,16 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 src_align.bytes() as c_uint,
                 size,
                 is_volatile,
-            );
+            )
+        };
+
+        // TypeTree metadata for memcpy is especially important: when Enzyme encounters
+        // a memcpy during autodiff, it needs to know the structure of the data being
+        // copied to properly track derivatives. For example, copying an array of floats
+        // vs. copying a struct with mixed types requires different derivative handling.
+        // The TypeTree tells Enzyme exactly what memory layout to expect.
+        if let Some(tt) = tt {
+            crate::typetree::add_tt(self.cx().llmod, self.cx().llcx, memcpy, tt);
         }
     }
 
@@ -1438,7 +1444,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 // If there is an inline attribute and a target feature that matches
                 // we will add the attribute to the callsite otherwise we'll omit
                 // this and not add the attribute to prevent soundness issues.
-                && let Some(inlining_rule) = attributes::inline_attr(&self.cx, instance)
+                && let Some(inlining_rule) = attributes::inline_attr(&self.cx, self.cx.tcx, instance)
                 && self.cx.tcx.is_target_feature_call_safe(
                     &fn_call_attrs.target_features,
                     &fn_defn_attrs.target_features,

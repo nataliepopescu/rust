@@ -614,7 +614,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (maybe_null, drop_fn, fn_abi, drop_instance) = match ty.kind() {
             // FIXME(eddyb) perhaps move some of this logic into
             // `Instance::resolve_drop_in_place`?
-            ty::Dynamic(_, _, ty::Dyn) => {
+            ty::Dynamic(_, _) => {
                 // IN THIS ARM, WE HAVE:
                 // ty = *mut (dyn Trait)
                 // which is: exists<T> ( *mut T,    Vtable<T: Trait> )
@@ -1626,6 +1626,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     align,
                     bx.const_usize(copy_bytes),
                     MemFlags::empty(),
+                    None,
                 );
                 // ...and then load it with the ABI type.
                 llval = load_cast(bx, cast, llscratch, scratch_align);

@@ -243,7 +243,7 @@ pub(crate) fn run_in_thread_pool_with_globals<
                                 let query_map = rustc_span::set_session_globals_then(unsafe { &*(session_globals as *const SessionGlobals) }, || {
                                     // Ensure there was no errors collecting all active jobs.
                                     // We need the complete map to ensure we find a cycle to break.
-                                    QueryCtxt::new(tcx).collect_active_jobs().ok().expect("failed to collect active queries in deadlock handler")
+                                    QueryCtxt::new(tcx).collect_active_jobs().expect("failed to collect active queries in deadlock handler")
                                 });
                                 break_query_cycles(query_map, &registry);
                             })
@@ -386,8 +386,8 @@ fn get_codegen_sysroot(
                 .collect::<Vec<_>>()
                 .join("\n* ");
             let err = format!(
-                "failed to find a `codegen-backends` folder \
-                           in the sysroot candidates:\n* {candidates}"
+                "failed to find a `codegen-backends` folder in the sysroot candidates:\n\
+                 * {candidates}"
             );
             early_dcx.early_fatal(err);
         });
@@ -396,10 +396,8 @@ fn get_codegen_sysroot(
 
     let d = sysroot.read_dir().unwrap_or_else(|e| {
         let err = format!(
-            "failed to load default codegen backend, couldn't \
-                           read `{}`: {}",
+            "failed to load default codegen backend, couldn't read `{}`: {e}",
             sysroot.display(),
-            e
         );
         early_dcx.early_fatal(err);
     });
@@ -544,6 +542,7 @@ pub fn build_output_filenames(attrs: &[ast::Attribute], sess: &Session) -> Outpu
                 stem,
                 None,
                 sess.io.temps_dir.clone(),
+                sess.opts.unstable_opts.split_dwarf_out_dir.clone(),
                 sess.opts.cg.extra_filename.clone(),
                 sess.opts.output_types.clone(),
             )
@@ -561,7 +560,7 @@ pub fn build_output_filenames(attrs: &[ast::Attribute], sess: &Session) -> Outpu
                 }
                 Some(out_file.clone())
             };
-            if sess.io.output_dir != None {
+            if sess.io.output_dir.is_some() {
                 sess.dcx().emit_warn(errors::IgnoringOutDir);
             }
 
@@ -573,6 +572,7 @@ pub fn build_output_filenames(attrs: &[ast::Attribute], sess: &Session) -> Outpu
                 out_filestem,
                 ofile,
                 sess.io.temps_dir.clone(),
+                sess.opts.unstable_opts.split_dwarf_out_dir.clone(),
                 sess.opts.cg.extra_filename.clone(),
                 sess.opts.output_types.clone(),
             )

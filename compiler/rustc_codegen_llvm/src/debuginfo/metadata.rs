@@ -32,9 +32,7 @@ use self::type_map::{DINodeCreationResult, Stub, UniqueTypeId};
 use super::CodegenUnitDebugContext;
 use super::namespace::mangled_name_of_instance;
 use super::type_names::{compute_debuginfo_type_name, compute_debuginfo_vtable_name};
-use super::utils::{
-    DIB, create_DIArray, debug_context, get_namespace_for_item, is_node_local_to_unit,
-};
+use super::utils::{DIB, debug_context, get_namespace_for_item, is_node_local_to_unit};
 use crate::common::{AsCCharPtr, CodegenCx};
 use crate::debuginfo::dwarf_const;
 use crate::debuginfo::metadata::type_map::build_type_with_children;
@@ -119,17 +117,17 @@ fn build_fixed_size_array_di_node<'ll, 'tcx>(
         .try_to_target_usize(cx.tcx)
         .expect("expected monomorphic const in codegen") as c_longlong;
 
-    let subrange =
-        unsafe { Some(llvm::LLVMRustDIBuilderGetOrCreateSubrange(DIB(cx), 0, upper_bound)) };
+    let subrange = unsafe { llvm::LLVMDIBuilderGetOrCreateSubrange(DIB(cx), 0, upper_bound) };
+    let subscripts = &[subrange];
 
-    let subscripts = create_DIArray(DIB(cx), &[subrange]);
     let di_node = unsafe {
-        llvm::LLVMRustDIBuilderCreateArrayType(
+        llvm::LLVMDIBuilderCreateArrayType(
             DIB(cx),
             size.bits(),
             align.bits() as u32,
             element_type_di_node,
-            subscripts,
+            subscripts.as_ptr(),
+            subscripts.len() as c_uint,
         )
     };
 
@@ -175,17 +173,13 @@ fn build_pointer_or_reference_di_node<'ll, 'tcx>(
                 "ptr_type={ptr_type}, pointee_type={pointee_type}",
             );
 
-            let di_node = unsafe {
-                llvm::LLVMRustDIBuilderCreatePointerType(
-                    DIB(cx),
-                    pointee_type_di_node,
-                    pointer_size.bits(),
-                    pointer_align.abi.bits() as u32,
-                    0, // Ignore DWARF address space.
-                    ptr_type_debuginfo_name.as_c_char_ptr(),
-                    ptr_type_debuginfo_name.len(),
-                )
-            };
+            let di_node = create_pointer_type(
+                cx,
+                pointee_type_di_node,
+                pointer_size,
+                pointer_align.abi,
+                &ptr_type_debuginfo_name,
+            );
 
             DINodeCreationResult { di_node, already_stored_in_typemap: false }
         }
@@ -233,17 +227,13 @@ fn build_pointer_or_reference_di_node<'ll, 'tcx>(
 
                     // The data pointer type is a regular, thin pointer, regardless of whether this
                     // is a slice or a trait object.
-                    let data_ptr_type_di_node = unsafe {
-                        llvm::LLVMRustDIBuilderCreatePointerType(
-                            DIB(cx),
-                            pointee_type_di_node,
-                            addr_field.size.bits(),
-                            addr_field.align.abi.bits() as u32,
-                            0, // Ignore DWARF address space.
-                            std::ptr::null(),
-                            0,
-                        )
-                    };
+                    let data_ptr_type_di_node = create_pointer_type(
+                        cx,
+                        pointee_type_di_node,
+                        addr_field.size,
+                        addr_field.align.abi,
+                        "",
+                    );
 
                     smallvec![
                         build_field_di_node(
@@ -318,7 +308,7 @@ fn build_subroutine_type_di_node<'ll, 'tcx>(
 
     debug_context(cx).type_map.unique_id_to_di_node.borrow_mut().remove(&unique_type_id);
 
-    let fn_di_node = create_subroutine_type(cx, create_DIArray(DIB(cx), &signature_di_nodes[..]));
+    let fn_di_node = create_subroutine_type(cx, &signature_di_nodes[..]);
 
     // This is actually a function pointer, so wrap it in pointer DI.
     let name = compute_debuginfo_type_name(cx.tcx, fn_ty, false);
@@ -329,26 +319,44 @@ fn build_subroutine_type_di_node<'ll, 'tcx>(
         }
         _ => unreachable!(),
     };
-    let di_node = unsafe {
-        llvm::LLVMRustDIBuilderCreatePointerType(
-            DIB(cx),
-            fn_di_node,
-            size.bits(),
-            align.bits() as u32,
-            0, // Ignore DWARF address space.
-            name.as_c_char_ptr(),
-            name.len(),
-        )
-    };
+    let di_node = create_pointer_type(cx, fn_di_node, size, align, &name);
 
     DINodeCreationResult::new(di_node, false)
 }
 
 pub(super) fn create_subroutine_type<'ll>(
     cx: &CodegenCx<'ll, '_>,
-    signature: &'ll DICompositeType,
+    signature: &[Option<&'ll llvm::Metadata>],
 ) -> &'ll DICompositeType {
-    unsafe { llvm::LLVMRustDIBuilderCreateSubroutineType(DIB(cx), signature) }
+    unsafe {
+        llvm::LLVMDIBuilderCreateSubroutineType(
+            DIB(cx),
+            None, // ("File" is ignored and has no effect)
+            signature.as_ptr(),
+            signature.len() as c_uint,
+            DIFlags::FlagZero, // (default value)
+        )
+    }
+}
+
+fn create_pointer_type<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    pointee_ty: &'ll llvm::Metadata,
+    size: Size,
+    align: Align,
+    name: &str,
+) -> &'ll llvm::Metadata {
+    unsafe {
+        llvm::LLVMDIBuilderCreatePointerType(
+            DIB(cx),
+            pointee_ty,
+            size.bits(),
+            align.bits() as u32,
+            0, // Ignore DWARF address space.
+            name.as_ptr(),
+            name.len(),
+        )
+    }
 }
 
 /// Create debuginfo for `dyn SomeTrait` types. Currently these are empty structs
@@ -469,8 +477,8 @@ pub(crate) fn spanned_type_di_node<'ll, 'tcx>(
         ty::CoroutineClosure(..) => build_closure_env_di_node(cx, unique_type_id),
         ty::Coroutine(..) => enums::build_coroutine_di_node(cx, unique_type_id),
         ty::Adt(def, ..) => match def.adt_kind() {
-            AdtKind::Struct => build_struct_type_di_node(cx, unique_type_id),
-            AdtKind::Union => build_union_type_di_node(cx, unique_type_id),
+            AdtKind::Struct => build_struct_type_di_node(cx, unique_type_id, span),
+            AdtKind::Union => build_union_type_di_node(cx, unique_type_id, span),
             AdtKind::Enum => enums::build_enum_type_di_node(cx, unique_type_id, span),
         },
         ty::Tuple(_) => build_tuple_type_di_node(cx, unique_type_id),
@@ -813,14 +821,15 @@ fn build_basic_type_di_node<'ll, 'tcx>(
     };
 
     let typedef_di_node = unsafe {
-        llvm::LLVMRustDIBuilderCreateTypedef(
+        llvm::LLVMDIBuilderCreateTypedef(
             DIB(cx),
             ty_di_node,
-            typedef_name.as_c_char_ptr(),
+            typedef_name.as_ptr(),
             typedef_name.len(),
             unknown_file_metadata(cx),
-            0,
-            None,
+            0,    // (no line number)
+            None, // (no scope)
+            0u32, // (no alignment specified)
         )
     };
 
@@ -834,12 +843,13 @@ fn create_basic_type<'ll, 'tcx>(
     encoding: u32,
 ) -> &'ll DIBasicType {
     unsafe {
-        llvm::LLVMRustDIBuilderCreateBasicType(
+        llvm::LLVMDIBuilderCreateBasicType(
             DIB(cx),
-            name.as_c_char_ptr(),
+            name.as_ptr(),
             name.len(),
             size.bits(),
             encoding,
+            DIFlags::FlagZero,
         )
     }
 }
@@ -1025,15 +1035,15 @@ fn create_member_type<'ll, 'tcx>(
     type_di_node: &'ll DIType,
 ) -> &'ll DIType {
     unsafe {
-        llvm::LLVMRustDIBuilderCreateMemberType(
+        llvm::LLVMDIBuilderCreateMemberType(
             DIB(cx),
             owner,
-            name.as_c_char_ptr(),
+            name.as_ptr(),
             name.len(),
             file_metadata,
             line_number,
             layout.size.bits(),
-            layout.align.abi.bits() as u32,
+            layout.align.bits() as u32,
             offset.bits(),
             flags,
             type_di_node,
@@ -1066,6 +1076,7 @@ fn visibility_di_flags<'ll, 'tcx>(
 fn build_struct_type_di_node<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     unique_type_id: UniqueTypeId<'tcx>,
+    span: Span,
 ) -> DINodeCreationResult<'ll> {
     let struct_type = unique_type_id.expect_ty();
     let ty::Adt(adt_def, _) = struct_type.kind() else {
@@ -1073,7 +1084,7 @@ fn build_struct_type_di_node<'ll, 'tcx>(
     };
     assert!(adt_def.is_struct());
     let containing_scope = get_namespace_for_item(cx, adt_def.did());
-    let struct_type_and_layout = cx.layout_of(struct_type);
+    let struct_type_and_layout = cx.spanned_layout_of(struct_type, span);
     let variant_def = adt_def.non_enum_variant();
     let def_location = if cx.sess().opts.unstable_opts.debug_info_type_line_numbers {
         Some(file_metadata_from_def_id(cx, Some(adt_def.did())))
@@ -1266,6 +1277,7 @@ fn build_closure_env_di_node<'ll, 'tcx>(
 fn build_union_type_di_node<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     unique_type_id: UniqueTypeId<'tcx>,
+    span: Span,
 ) -> DINodeCreationResult<'ll> {
     let union_type = unique_type_id.expect_ty();
     let (union_def_id, variant_def) = match union_type.kind() {
@@ -1273,7 +1285,7 @@ fn build_union_type_di_node<'ll, 'tcx>(
         _ => bug!("build_union_type_di_node on a non-ADT"),
     };
     let containing_scope = get_namespace_for_item(cx, union_def_id);
-    let union_ty_and_layout = cx.layout_of(union_type);
+    let union_ty_and_layout = cx.spanned_layout_of(union_type, span);
     let type_name = compute_debuginfo_type_name(cx.tcx, union_type, false);
     let def_location = if cx.sess().opts.unstable_opts.debug_info_type_line_numbers {
         Some(file_metadata_from_def_id(cx, Some(union_def_id)))

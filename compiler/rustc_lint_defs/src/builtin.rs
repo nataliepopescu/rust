@@ -2309,10 +2309,10 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
-    /// #![cfg_attr(not(bootstrap), feature(sanitize))]
+    /// #![feature(sanitize)]
     ///
     /// #[inline(always)]
-    /// #[cfg_attr(not(bootstrap), sanitize(address = "off"))]
+    /// #[sanitize(address = "off")]
     /// fn x() {}
     ///
     /// fn main() {
@@ -4191,8 +4191,13 @@ declare_lint! {
     /// You can't have multiple arguments in a `#[macro_export(..)]`, or mention arguments other than `local_inner_macros`.
     ///
     pub INVALID_MACRO_EXPORT_ARGUMENTS,
-    Warn,
+    Deny,
     "\"invalid_parameter\" isn't a valid argument for `#[macro_export]`",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseError,
+        reference: "issue #57571 <https://github.com/rust-lang/rust/issues/57571>",
+        report_in_deps: true,
+    };
 }
 
 declare_lint! {
@@ -4832,16 +4837,13 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    #[cfg_attr(not(bootstrap), doc = "```rust,compile_fail")]
-    #[cfg_attr(bootstrap, doc = "```rust")]
+    /// ```rust,compile_fail
     /// #![doc = in_root!()]
     ///
     /// macro_rules! in_root { () => { "" } }
     ///
     /// fn main() {}
-    #[cfg_attr(not(bootstrap), doc = "```")]
-    #[cfg_attr(bootstrap, doc = "```")]
-    // ^ Needed to avoid tidy warning about odd number of backticks
+    /// ```
     ///
     /// {{produces}}
     ///

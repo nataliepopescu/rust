@@ -6,6 +6,7 @@ use rustc_type_ir::search_graph::{self, PathKind};
 use rustc_type_ir::solve::{CanonicalInput, Certainty, NoSolution, QueryResult};
 use rustc_type_ir::{Interner, TypingMode};
 
+use crate::canonical::response_no_constraints_raw;
 use crate::delegate::SolverDelegate;
 use crate::solve::{
     EvalCtxt, FIXPOINT_STEP_LIMIT, has_no_inference_or_external_constraints, inspect,
@@ -73,27 +74,35 @@ where
         }
     }
 
-    fn is_initial_provisional_result(
-        cx: Self::Cx,
-        kind: PathKind,
-        input: CanonicalInput<I>,
-        result: QueryResult<I>,
-    ) -> bool {
-        Self::initial_provisional_result(cx, kind, input) == result
+    fn is_initial_provisional_result(result: QueryResult<I>) -> Option<PathKind> {
+        match result {
+            Ok(response) => {
+                if has_no_inference_or_external_constraints(response) {
+                    if response.value.certainty == Certainty::Yes {
+                        return Some(PathKind::Coinductive);
+                    } else if response.value.certainty == Certainty::overflow(false) {
+                        return Some(PathKind::Unknown);
+                    }
+                }
+
+                None
+            }
+            Err(NoSolution) => Some(PathKind::Inductive),
+        }
     }
 
-    fn on_stack_overflow(cx: I, input: CanonicalInput<I>) -> QueryResult<I> {
+    fn stack_overflow_result(cx: I, input: CanonicalInput<I>) -> QueryResult<I> {
         response_no_constraints(cx, input, Certainty::overflow(true))
     }
 
-    fn on_fixpoint_overflow(cx: I, input: CanonicalInput<I>) -> QueryResult<I> {
+    fn fixpoint_overflow_result(cx: I, input: CanonicalInput<I>) -> QueryResult<I> {
         response_no_constraints(cx, input, Certainty::overflow(false))
     }
 
     fn is_ambiguous_result(result: QueryResult<I>) -> bool {
         result.is_ok_and(|response| {
             has_no_inference_or_external_constraints(response)
-                && matches!(response.value.certainty, Certainty::Maybe(_))
+                && matches!(response.value.certainty, Certainty::Maybe { .. })
         })
     }
 
@@ -127,7 +136,7 @@ fn response_no_constraints<I: Interner>(
     input: CanonicalInput<I>,
     certainty: Certainty,
 ) -> QueryResult<I> {
-    Ok(super::response_no_constraints_raw(
+    Ok(response_no_constraints_raw(
         cx,
         input.canonical.max_universe,
         input.canonical.variables,

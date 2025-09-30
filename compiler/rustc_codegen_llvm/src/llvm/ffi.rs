@@ -24,9 +24,9 @@ use rustc_target::spec::SymbolVisibility;
 
 use super::RustString;
 use super::debuginfo::{
-    DIArray, DIBasicType, DIBuilder, DICompositeType, DIDerivedType, DIDescriptor, DIEnumerator,
-    DIFile, DIFlags, DIGlobalVariableExpression, DILocation, DISPFlags, DIScope, DISubprogram,
-    DISubrange, DITemplateTypeParameter, DIType, DIVariable, DebugEmissionKind, DebugNameTableKind,
+    DIArray, DIBuilder, DIDerivedType, DIDescriptor, DIEnumerator, DIFile, DIFlags,
+    DIGlobalVariableExpression, DILocation, DISPFlags, DIScope, DISubprogram,
+    DITemplateTypeParameter, DIType, DebugEmissionKind, DebugNameTableKind,
 };
 use crate::llvm;
 
@@ -710,6 +710,7 @@ pub(crate) enum MemoryEffects {
     None,
     ReadOnly,
     InaccessibleMemOnly,
+    ReadOnlyNotPure,
 }
 
 /// LLVMOpcode
@@ -806,6 +807,8 @@ unsafe extern "C" {
     pub(crate) type Metadata;
     pub(crate) type BasicBlock;
     pub(crate) type Comdat;
+    /// `&'ll DbgRecord` represents `LLVMDbgRecordRef`.
+    pub(crate) type DbgRecord;
 }
 #[repr(C)]
 pub(crate) struct Builder<'a>(InvariantOpaque<'a>);
@@ -890,7 +893,6 @@ pub(crate) mod debuginfo {
     pub(crate) type DIVariable = DIDescriptor;
     pub(crate) type DIGlobalVariableExpression = DIDescriptor;
     pub(crate) type DIArray = DIDescriptor;
-    pub(crate) type DISubrange = DIDescriptor;
     pub(crate) type DIEnumerator = DIDescriptor;
     pub(crate) type DITemplateTypeParameter = DIDescriptor;
 
@@ -1051,6 +1053,8 @@ unsafe extern "C" {
         Name: *const c_char,
         SLen: c_uint,
     ) -> MetadataKindId;
+
+    pub(crate) fn LLVMDisposeTargetMachine(T: ptr::NonNull<TargetMachine>);
 
     // Create modules.
     pub(crate) fn LLVMModuleCreateWithNameInContext(
@@ -1237,6 +1241,7 @@ unsafe extern "C" {
     pub(crate) safe fn LLVMSetGlobalConstant(GlobalVar: &Value, IsConstant: Bool);
     pub(crate) safe fn LLVMSetTailCall(CallInst: &Value, IsTailCall: Bool);
     pub(crate) safe fn LLVMSetTailCallKind(CallInst: &Value, kind: TailCallKind);
+    pub(crate) safe fn LLVMSetExternallyInitialized(GlobalVar: &Value, IsExtInit: Bool);
 
     // Operations on attributes
     pub(crate) fn LLVMCreateStringAttribute(
@@ -1870,6 +1875,177 @@ unsafe extern "C" {
         Scope: &'ll Metadata,
         InlinedAt: Option<&'ll Metadata>,
     ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateSubroutineType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        File: Option<&'ll Metadata>, // (ignored and has no effect)
+        ParameterTypes: *const Option<&'ll Metadata>,
+        NumParameterTypes: c_uint,
+        Flags: DIFlags, // (default is `DIFlags::DIFlagZero`)
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateUnionType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Scope: Option<&'ll Metadata>,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        File: &'ll Metadata,
+        LineNumber: c_uint,
+        SizeInBits: u64,
+        AlignInBits: u32,
+        Flags: DIFlags,
+        Elements: *const Option<&'ll Metadata>,
+        NumElements: c_uint,
+        RunTimeLang: c_uint, // (optional Objective-C runtime version; default is 0)
+        UniqueId: *const c_uchar, // See "PTR_LEN_STR".
+        UniqueIdLen: size_t,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateArrayType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Size: u64,
+        Align: u32,
+        Ty: &'ll Metadata,
+        Subscripts: *const &'ll Metadata,
+        NumSubscripts: c_uint,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateBasicType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        SizeInBits: u64,
+        Encoding: c_uint, // (`LLVMDWARFTypeEncoding`)
+        Flags: DIFlags,   // (default is `DIFlags::DIFlagZero`)
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreatePointerType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        PointeeTy: &'ll Metadata,
+        SizeInBits: u64,
+        AlignInBits: u32,
+        AddressSpace: c_uint, // (optional DWARF address space; default is 0)
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateStructType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Scope: Option<&'ll Metadata>,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        File: &'ll Metadata,
+        LineNumber: c_uint,
+        SizeInBits: u64,
+        AlignInBits: u32,
+        Flags: DIFlags,
+        DerivedFrom: Option<&'ll Metadata>,
+        Elements: *const Option<&'ll Metadata>,
+        NumElements: c_uint,
+        RunTimeLang: c_uint, // (optional Objective-C runtime version; default is 0)
+        VTableHolder: Option<&'ll Metadata>,
+        UniqueId: *const c_uchar, // See "PTR_LEN_STR".
+        UniqueIdLen: size_t,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateMemberType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Scope: &'ll Metadata,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        File: &'ll Metadata,
+        LineNo: c_uint,
+        SizeInBits: u64,
+        AlignInBits: u32,
+        OffsetInBits: u64,
+        Flags: DIFlags,
+        Ty: &'ll Metadata,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateStaticMemberType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Scope: &'ll Metadata,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        File: &'ll Metadata,
+        LineNumber: c_uint,
+        Type: &'ll Metadata,
+        Flags: DIFlags,
+        ConstantVal: Option<&'ll Value>,
+        AlignInBits: u32,
+    ) -> &'ll Metadata;
+
+    /// Creates a "qualified type" in the C/C++ sense, by adding modifiers
+    /// like `const` or `volatile`.
+    pub(crate) fn LLVMDIBuilderCreateQualifiedType<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Tag: c_uint, // (DWARF tag, e.g. `DW_TAG_const_type`)
+        Type: &'ll Metadata,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateTypedef<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Type: &'ll Metadata,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        File: &'ll Metadata,
+        LineNo: c_uint,
+        Scope: Option<&'ll Metadata>,
+        AlignInBits: u32, // (optional; default is 0)
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderGetOrCreateSubrange<'ll>(
+        Builder: &DIBuilder<'ll>,
+        LowerBound: i64,
+        Count: i64,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderGetOrCreateArray<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Data: *const Option<&'ll Metadata>,
+        NumElements: size_t,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateExpression<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Addr: *const u64,
+        Length: size_t,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderInsertDeclareRecordAtEnd<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Storage: &'ll Value,
+        VarInfo: &'ll Metadata,
+        Expr: &'ll Metadata,
+        DebugLoc: &'ll Metadata,
+        Block: &'ll BasicBlock,
+    ) -> &'ll DbgRecord;
+
+    pub(crate) fn LLVMDIBuilderCreateAutoVariable<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Scope: &'ll Metadata,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        File: &'ll Metadata,
+        LineNo: c_uint,
+        Ty: &'ll Metadata,
+        AlwaysPreserve: llvm::Bool, // "If true, this descriptor will survive optimizations."
+        Flags: DIFlags,
+        AlignInBits: u32,
+    ) -> &'ll Metadata;
+
+    pub(crate) fn LLVMDIBuilderCreateParameterVariable<'ll>(
+        Builder: &DIBuilder<'ll>,
+        Scope: &'ll Metadata,
+        Name: *const c_uchar, // See "PTR_LEN_STR".
+        NameLen: size_t,
+        ArgNo: c_uint,
+        File: &'ll Metadata,
+        LineNo: c_uint,
+        Ty: &'ll Metadata,
+        AlwaysPreserve: llvm::Bool, // "If true, this descriptor will survive optimizations."
+        Flags: DIFlags,
+    ) -> &'ll Metadata;
 }
 
 #[link(name = "llvm-wrapper", kind = "static")]
@@ -2172,11 +2348,6 @@ unsafe extern "C" {
         SourceLen: size_t,
     ) -> &'a DIFile;
 
-    pub(crate) fn LLVMRustDIBuilderCreateSubroutineType<'a>(
-        Builder: &DIBuilder<'a>,
-        ParameterTypes: &'a DIArray,
-    ) -> &'a DICompositeType;
-
     pub(crate) fn LLVMRustDIBuilderCreateFunction<'a>(
         Builder: &DIBuilder<'a>,
         Scope: &'a DIDescriptor,
@@ -2210,66 +2381,6 @@ unsafe extern "C" {
         TParam: &'a DIArray,
     ) -> &'a DISubprogram;
 
-    pub(crate) fn LLVMRustDIBuilderCreateBasicType<'a>(
-        Builder: &DIBuilder<'a>,
-        Name: *const c_char,
-        NameLen: size_t,
-        SizeInBits: u64,
-        Encoding: c_uint,
-    ) -> &'a DIBasicType;
-
-    pub(crate) fn LLVMRustDIBuilderCreateTypedef<'a>(
-        Builder: &DIBuilder<'a>,
-        Type: &'a DIBasicType,
-        Name: *const c_char,
-        NameLen: size_t,
-        File: &'a DIFile,
-        LineNo: c_uint,
-        Scope: Option<&'a DIScope>,
-    ) -> &'a DIDerivedType;
-
-    pub(crate) fn LLVMRustDIBuilderCreatePointerType<'a>(
-        Builder: &DIBuilder<'a>,
-        PointeeTy: &'a DIType,
-        SizeInBits: u64,
-        AlignInBits: u32,
-        AddressSpace: c_uint,
-        Name: *const c_char,
-        NameLen: size_t,
-    ) -> &'a DIDerivedType;
-
-    pub(crate) fn LLVMRustDIBuilderCreateStructType<'a>(
-        Builder: &DIBuilder<'a>,
-        Scope: Option<&'a DIDescriptor>,
-        Name: *const c_char,
-        NameLen: size_t,
-        File: &'a DIFile,
-        LineNumber: c_uint,
-        SizeInBits: u64,
-        AlignInBits: u32,
-        Flags: DIFlags,
-        DerivedFrom: Option<&'a DIType>,
-        Elements: &'a DIArray,
-        RunTimeLang: c_uint,
-        VTableHolder: Option<&'a DIType>,
-        UniqueId: *const c_char,
-        UniqueIdLen: size_t,
-    ) -> &'a DICompositeType;
-
-    pub(crate) fn LLVMRustDIBuilderCreateMemberType<'a>(
-        Builder: &DIBuilder<'a>,
-        Scope: &'a DIDescriptor,
-        Name: *const c_char,
-        NameLen: size_t,
-        File: &'a DIFile,
-        LineNo: c_uint,
-        SizeInBits: u64,
-        AlignInBits: u32,
-        OffsetInBits: u64,
-        Flags: DIFlags,
-        Ty: &'a DIType,
-    ) -> &'a DIDerivedType;
-
     pub(crate) fn LLVMRustDIBuilderCreateVariantMemberType<'a>(
         Builder: &DIBuilder<'a>,
         Scope: &'a DIScope,
@@ -2284,25 +2395,6 @@ unsafe extern "C" {
         Flags: DIFlags,
         Ty: &'a DIType,
     ) -> &'a DIType;
-
-    pub(crate) fn LLVMRustDIBuilderCreateStaticMemberType<'a>(
-        Builder: &DIBuilder<'a>,
-        Scope: &'a DIDescriptor,
-        Name: *const c_char,
-        NameLen: size_t,
-        File: &'a DIFile,
-        LineNo: c_uint,
-        Ty: &'a DIType,
-        Flags: DIFlags,
-        val: Option<&'a Value>,
-        AlignInBits: u32,
-    ) -> &'a DIDerivedType;
-
-    pub(crate) fn LLVMRustDIBuilderCreateQualifiedType<'a>(
-        Builder: &DIBuilder<'a>,
-        Tag: c_uint,
-        Type: &'a DIType,
-    ) -> &'a DIDerivedType;
 
     pub(crate) fn LLVMRustDIBuilderCreateStaticVariable<'a>(
         Builder: &DIBuilder<'a>,
@@ -2319,51 +2411,6 @@ unsafe extern "C" {
         Decl: Option<&'a DIDescriptor>,
         AlignInBits: u32,
     ) -> &'a DIGlobalVariableExpression;
-
-    pub(crate) fn LLVMRustDIBuilderCreateVariable<'a>(
-        Builder: &DIBuilder<'a>,
-        Tag: c_uint,
-        Scope: &'a DIDescriptor,
-        Name: *const c_char,
-        NameLen: size_t,
-        File: &'a DIFile,
-        LineNo: c_uint,
-        Ty: &'a DIType,
-        AlwaysPreserve: bool,
-        Flags: DIFlags,
-        ArgNo: c_uint,
-        AlignInBits: u32,
-    ) -> &'a DIVariable;
-
-    pub(crate) fn LLVMRustDIBuilderCreateArrayType<'a>(
-        Builder: &DIBuilder<'a>,
-        Size: u64,
-        AlignInBits: u32,
-        Ty: &'a DIType,
-        Subscripts: &'a DIArray,
-    ) -> &'a DIType;
-
-    pub(crate) fn LLVMRustDIBuilderGetOrCreateSubrange<'a>(
-        Builder: &DIBuilder<'a>,
-        Lo: i64,
-        Count: i64,
-    ) -> &'a DISubrange;
-
-    pub(crate) fn LLVMRustDIBuilderGetOrCreateArray<'a>(
-        Builder: &DIBuilder<'a>,
-        Ptr: *const Option<&'a DIDescriptor>,
-        Count: c_uint,
-    ) -> &'a DIArray;
-
-    pub(crate) fn LLVMRustDIBuilderInsertDeclareAtEnd<'a>(
-        Builder: &DIBuilder<'a>,
-        Val: &'a Value,
-        VarInfo: &'a DIVariable,
-        AddrOps: *const u64,
-        AddrOpsCount: c_uint,
-        DL: &'a DILocation,
-        InsertAtEnd: &'a BasicBlock,
-    );
 
     pub(crate) fn LLVMRustDIBuilderCreateEnumerator<'a>(
         Builder: &DIBuilder<'a>,
@@ -2386,22 +2433,6 @@ unsafe extern "C" {
         Elements: &'a DIArray,
         ClassType: &'a DIType,
         IsScoped: bool,
-    ) -> &'a DIType;
-
-    pub(crate) fn LLVMRustDIBuilderCreateUnionType<'a>(
-        Builder: &DIBuilder<'a>,
-        Scope: Option<&'a DIScope>,
-        Name: *const c_char,
-        NameLen: size_t,
-        File: &'a DIFile,
-        LineNumber: c_uint,
-        SizeInBits: u64,
-        AlignInBits: u32,
-        Flags: DIFlags,
-        Elements: Option<&'a DIArray>,
-        RunTimeLang: c_uint,
-        UniqueId: *const c_char,
-        UniqueIdLen: size_t,
     ) -> &'a DIType;
 
     pub(crate) fn LLVMRustDIBuilderCreateVariantPart<'a>(
@@ -2480,12 +2511,13 @@ unsafe extern "C" {
         OutputObjFile: *const c_char,
         DebugInfoCompression: *const c_char,
         UseEmulatedTls: bool,
-        ArgsCstrBuff: *const c_uchar, // See "PTR_LEN_STR".
-        ArgsCstrBuffLen: usize,
+        Argv0: *const c_uchar, // See "PTR_LEN_STR".
+        Argv0Len: size_t,
+        CommandLineArgs: *const c_uchar, // See "PTR_LEN_STR".
+        CommandLineArgsLen: size_t,
         UseWasmEH: bool,
     ) -> *mut TargetMachine;
 
-    pub(crate) fn LLVMRustDisposeTargetMachine(T: *mut TargetMachine);
     pub(crate) fn LLVMRustAddLibraryInfo<'a>(
         PM: &PassManager<'a>,
         M: &'a Module,

@@ -215,9 +215,9 @@ impl<'ll, 'tcx> ArgAbiExt<'ll, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 let align = attrs.pointee_align.unwrap_or(self.layout.align.abi);
                 OperandValue::Ref(PlaceValue::new_sized(val, align)).store(bx, dst);
             }
-            // Unsized indirect qrguments
+            // Unsized indirect arguments cannot be stored
             PassMode::Indirect { attrs: _, meta_attrs: Some(_), on_stack: _ } => {
-                bug!("unsized `ArgAbi` must be handled through `store_fn_arg`");
+                bug!("unsized `ArgAbi` cannot be stored");
             }
             PassMode::Cast { cast, pad_i32: _ } => {
                 // The ABI mandates that the value is passed as a different struct representation.
@@ -246,6 +246,7 @@ impl<'ll, 'tcx> ArgAbiExt<'ll, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                     scratch_align,
                     bx.const_usize(copy_bytes),
                     MemFlags::empty(),
+                    None,
                 );
                 bx.lifetime_end(llscratch, scratch_size);
             }
@@ -272,12 +273,7 @@ impl<'ll, 'tcx> ArgAbiExt<'ll, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 OperandValue::Pair(next(), next()).store(bx, dst);
             }
             PassMode::Indirect { attrs: _, meta_attrs: Some(_), on_stack: _ } => {
-                let place_val = PlaceValue {
-                    llval: next(),
-                    llextra: Some(next()),
-                    align: self.layout.align.abi,
-                };
-                OperandValue::Ref(place_val).store(bx, dst);
+                bug!("unsized `ArgAbi` cannot be stored");
             }
             PassMode::Direct(_)
             | PassMode::Indirect { attrs: _, meta_attrs: None, on_stack: _ }
@@ -543,7 +539,13 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
 
         // If the declaration has an associated instance, compute extra attributes based on that.
         if let Some(instance) = instance {
-            llfn_attrs_from_instance(cx, llfn, instance);
+            llfn_attrs_from_instance(
+                cx,
+                cx.tcx,
+                llfn,
+                &cx.tcx.codegen_instance_attrs(instance.def),
+                Some(instance),
+            );
         }
     }
 

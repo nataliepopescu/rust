@@ -10,7 +10,7 @@ use std::collections::hash_map::Entry;
 use std::slice;
 
 use rustc_abi::{Align, ExternAbi, Size};
-use rustc_ast::{AttrStyle, LitKind, MetaItemInner, MetaItemKind, ast};
+use rustc_ast::{AttrStyle, LitKind, MetaItem, MetaItemInner, MetaItemKind, ast};
 use rustc_attr_parsing::{AttributeParser, Late};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{Applicability, DiagCtxtHandle, IntoDiagArg, MultiSpan, StashKey};
@@ -38,8 +38,8 @@ use rustc_middle::{bug, span_bug};
 use rustc_session::config::CrateType;
 use rustc_session::lint;
 use rustc_session::lint::builtin::{
-    CONFLICTING_REPR_HINTS, INVALID_DOC_ATTRIBUTES, INVALID_MACRO_EXPORT_ARGUMENTS,
-    MALFORMED_DIAGNOSTIC_ATTRIBUTES, MISPLACED_DIAGNOSTIC_ATTRIBUTES, UNUSED_ATTRIBUTES,
+    CONFLICTING_REPR_HINTS, INVALID_DOC_ATTRIBUTES, MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+    MISPLACED_DIAGNOSTIC_ATTRIBUTES, UNUSED_ATTRIBUTES,
 };
 use rustc_session::parse::feature_err;
 use rustc_span::edition::Edition;
@@ -217,7 +217,10 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 },
                 Attribute::Parsed(AttributeKind::Link(_, attr_span)) => {
                     self.check_link(hir_id, *attr_span, span, target)
-                }
+                },
+                Attribute::Parsed(AttributeKind::MacroExport { span, .. }) => {
+                    self.check_macro_export(hir_id, *span, target)
+                },
                 Attribute::Parsed(
                     AttributeKind::BodyStability { .. }
                     | AttributeKind::ConstStabilityIndirect
@@ -246,7 +249,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::Repr { .. }
                     | AttributeKind::Cold(..)
                     | AttributeKind::ExportName { .. }
-                    | AttributeKind::CoherenceIsCore
                     | AttributeKind::Fundamental
                     | AttributeKind::Optimize(..)
                     | AttributeKind::LinkSection { .. }
@@ -254,6 +256,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::MacroEscape( .. )
                     | AttributeKind::RustcLayoutScalarValidRangeStart(..)
                     | AttributeKind::RustcLayoutScalarValidRangeEnd(..)
+                    | AttributeKind::RustcSimdMonomorphizeLaneLimit(..)
                     | AttributeKind::ExportStable
                     | AttributeKind::FfiConst(..)
                     | AttributeKind::UnstableFeatureBound(..)
@@ -276,6 +279,10 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::PatternComplexityLimit { .. }
                     | AttributeKind::NoCore { .. }
                     | AttributeKind::NoStd { .. }
+                    | AttributeKind::ObjcClass { .. }
+                    | AttributeKind::ObjcSelector { .. }
+                    | AttributeKind::RustcCoherenceIsCore(..)
+                    | AttributeKind::DebuggerVisualizer(..)
                 ) => { /* do nothing  */ }
                 Attribute::Unparsed(attr_item) => {
                     style = Some(attr_item.style);
@@ -296,7 +303,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                             &mut doc_aliases,
                         ),
                         [sym::no_link, ..] => self.check_no_link(hir_id, attr, span, target),
-                        [sym::debugger_visualizer, ..] => self.check_debugger_visualizer(attr, target),
                         [sym::rustc_no_implicit_autorefs, ..] => {
                             self.check_applied_to_fn_or_method(hir_id, attr.span(), span, target)
                         }
@@ -329,7 +335,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                         [sym::rustc_has_incoherent_inherent_impls, ..] => {
                             self.check_has_incoherent_inherent_impls(attr, span, target)
                         }
-                        [sym::macro_export, ..] => self.check_macro_export(hir_id, attr, target),
                         [sym::autodiff_forward, ..] | [sym::autodiff_reverse, ..] => {
                             self.check_autodiff(hir_id, attr, span, target)
                         }
@@ -1155,16 +1160,59 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
         }
     }
 
-    /// Check that the `#![doc(cfg_hide(...))]` attribute only contains a list of attributes.
-    ///
-    fn check_doc_cfg_hide(&self, meta: &MetaItemInner, hir_id: HirId) {
-        if meta.meta_item_list().is_none() {
-            self.tcx.emit_node_span_lint(
-                INVALID_DOC_ATTRIBUTES,
-                hir_id,
-                meta.span(),
-                errors::DocCfgHideTakesList,
-            );
+    /// Check that the `#![doc(auto_cfg)]` attribute has the expected input.
+    fn check_doc_auto_cfg(&self, meta: &MetaItem, hir_id: HirId) {
+        match &meta.kind {
+            MetaItemKind::Word => {}
+            MetaItemKind::NameValue(lit) => {
+                if !matches!(lit.kind, LitKind::Bool(_)) {
+                    self.tcx.emit_node_span_lint(
+                        INVALID_DOC_ATTRIBUTES,
+                        hir_id,
+                        meta.span,
+                        errors::DocAutoCfgWrongLiteral,
+                    );
+                }
+            }
+            MetaItemKind::List(list) => {
+                for item in list {
+                    let Some(attr_name @ (sym::hide | sym::show)) = item.name() else {
+                        self.tcx.emit_node_span_lint(
+                            INVALID_DOC_ATTRIBUTES,
+                            hir_id,
+                            meta.span,
+                            errors::DocAutoCfgExpectsHideOrShow,
+                        );
+                        continue;
+                    };
+                    if let Some(list) = item.meta_item_list() {
+                        for item in list {
+                            let valid = item.meta_item().is_some_and(|meta| {
+                                meta.path.segments.len() == 1
+                                    && matches!(
+                                        &meta.kind,
+                                        MetaItemKind::Word | MetaItemKind::NameValue(_)
+                                    )
+                            });
+                            if !valid {
+                                self.tcx.emit_node_span_lint(
+                                    INVALID_DOC_ATTRIBUTES,
+                                    hir_id,
+                                    item.span(),
+                                    errors::DocAutoCfgHideShowUnexpectedItem { attr_name },
+                                );
+                            }
+                        }
+                    } else {
+                        self.tcx.emit_node_span_lint(
+                            INVALID_DOC_ATTRIBUTES,
+                            hir_id,
+                            meta.span,
+                            errors::DocAutoCfgHideShowExpectsList { attr_name },
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1240,10 +1288,8 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                             self.check_attr_crate_level(attr, style, meta, hir_id);
                         }
 
-                        Some(sym::cfg_hide) => {
-                            if self.check_attr_crate_level(attr, style, meta, hir_id) {
-                                self.check_doc_cfg_hide(meta, hir_id);
-                            }
+                        Some(sym::auto_cfg) => {
+                            self.check_doc_auto_cfg(i_meta, hir_id);
                         }
 
                         Some(sym::inline | sym::no_inline) => {
@@ -1778,20 +1824,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
         }
     }
 
-    /// Checks if the items on the `#[debugger_visualizer]` attribute are valid.
-    fn check_debugger_visualizer(&self, attr: &Attribute, target: Target) {
-        // Here we only check that the #[debugger_visualizer] attribute is attached
-        // to nothing other than a module. All other checks are done in the
-        // `debugger_visualizer` query where they need to be done for decoding
-        // anyway.
-        match target {
-            Target::Mod => {}
-            _ => {
-                self.dcx().emit_err(errors::DebugVisualizerPlacement { span: attr.span() });
-            }
-        }
-    }
-
     /// Outputs an error for `#[allow_internal_unstable]` which can only be applied to macros.
     /// (Allows proc_macro functions)
     fn check_rustc_allow_const_fn_unstable(
@@ -1848,45 +1880,22 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
         }
     }
 
-    fn check_macro_export(&self, hir_id: HirId, attr: &Attribute, target: Target) {
+    fn check_macro_export(&self, hir_id: HirId, attr_span: Span, target: Target) {
         if target != Target::MacroDef {
+            return;
+        }
+
+        // special case when `#[macro_export]` is applied to a macro 2.0
+        let (_, macro_definition, _) = self.tcx.hir_node(hir_id).expect_item().expect_macro();
+        let is_decl_macro = !macro_definition.macro_rules;
+
+        if is_decl_macro {
             self.tcx.emit_node_span_lint(
                 UNUSED_ATTRIBUTES,
                 hir_id,
-                attr.span(),
-                errors::MacroExport::Normal,
+                attr_span,
+                errors::MacroExport::OnDeclMacro,
             );
-        } else if let Some(meta_item_list) = attr.meta_item_list()
-            && !meta_item_list.is_empty()
-        {
-            if meta_item_list.len() > 1 {
-                self.tcx.emit_node_span_lint(
-                    INVALID_MACRO_EXPORT_ARGUMENTS,
-                    hir_id,
-                    attr.span(),
-                    errors::MacroExport::TooManyItems,
-                );
-            } else if !meta_item_list[0].has_name(sym::local_inner_macros) {
-                self.tcx.emit_node_span_lint(
-                    INVALID_MACRO_EXPORT_ARGUMENTS,
-                    hir_id,
-                    meta_item_list[0].span(),
-                    errors::MacroExport::InvalidArgument,
-                );
-            }
-        } else {
-            // special case when `#[macro_export]` is applied to a macro 2.0
-            let (_, macro_definition, _) = self.tcx.hir_node(hir_id).expect_item().expect_macro();
-            let is_decl_macro = !macro_definition.macro_rules;
-
-            if is_decl_macro {
-                self.tcx.emit_node_span_lint(
-                    UNUSED_ATTRIBUTES,
-                    hir_id,
-                    attr.span(),
-                    errors::MacroExport::OnDeclMacro,
-                );
-            }
         }
     }
 
@@ -2251,7 +2260,9 @@ impl<'tcx> Visitor<'tcx> for CheckAttrVisitor<'tcx> {
         // In the long run, the checks should be harmonized.
         if let ItemKind::Macro(_, macro_def, _) = item.kind {
             let def_id = item.owner_id.to_def_id();
-            if macro_def.macro_rules && !self.tcx.has_attr(def_id, sym::macro_export) {
+            if macro_def.macro_rules
+                && !find_attr!(self.tcx.get_all_attrs(def_id), AttributeKind::MacroExport { .. })
+            {
                 check_non_exported_macro_for_invalid_attrs(self.tcx, item);
             }
         }
@@ -2382,7 +2393,6 @@ fn check_invalid_crate_level_attr(tcx: TyCtxt<'_>, attrs: &[Attribute]) {
     // which were unsuccessfully resolved due to cannot determine
     // resolution for the attribute macro error.
     const ATTRS_TO_CHECK: &[Symbol] = &[
-        sym::macro_export,
         sym::rustc_main,
         sym::derive,
         sym::test,

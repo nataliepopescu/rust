@@ -262,15 +262,16 @@ impl<'tcx> V0SymbolMangler<'tcx> {
     fn print_pat(&mut self, pat: ty::Pattern<'tcx>) -> Result<(), std::fmt::Error> {
         Ok(match *pat {
             ty::PatternKind::Range { start, end } => {
-                let consts = [start, end];
-                for ct in consts {
-                    Ty::new_array_with_const_len(self.tcx, self.tcx.types.unit, ct).print(self)?;
-                }
+                self.push("R");
+                self.print_const(start)?;
+                self.print_const(end)?;
             }
             ty::PatternKind::Or(patterns) => {
+                self.push("O");
                 for pat in patterns {
                     self.print_pat(pat)?;
                 }
+                self.push("E");
             }
         })
     }
@@ -498,12 +499,9 @@ impl<'tcx> Printer<'tcx> for V0SymbolMangler<'tcx> {
             }
 
             ty::Pat(ty, pat) => {
-                // HACK: Represent as tuple until we have something better.
-                // HACK: constants are used in arrays, even if the types don't match.
-                self.push("T");
+                self.push("W");
                 ty.print(self)?;
                 self.print_pat(pat)?;
-                self.push("E");
             }
 
             ty::Array(ty, len) => {
@@ -577,10 +575,8 @@ impl<'tcx> Printer<'tcx> for V0SymbolMangler<'tcx> {
             // FIXME(unsafe_binder):
             ty::UnsafeBinder(..) => todo!(),
 
-            ty::Dynamic(predicates, r, kind) => {
-                self.push(match kind {
-                    ty::Dyn => "D",
-                });
+            ty::Dynamic(predicates, r) => {
+                self.push("D");
                 self.print_dyn_existential(predicates)?;
                 r.print(self)?;
             }

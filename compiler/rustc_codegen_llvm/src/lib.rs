@@ -45,6 +45,7 @@ use rustc_middle::util::Providers;
 use rustc_session::Session;
 use rustc_session::config::{OptLevel, OutputFilenames, PrintKind, PrintRequest};
 use rustc_span::Symbol;
+use rustc_target::spec::{RelocModel, TlsModel};
 
 mod abi;
 mod allocator;
@@ -67,6 +68,7 @@ mod llvm_util;
 mod mono_item;
 mod type_;
 mod type_of;
+mod typetree;
 mod va_arg;
 mod value;
 
@@ -230,6 +232,10 @@ impl CodegenBackend for LlvmCodegenBackend {
         crate::DEFAULT_LOCALE_RESOURCE
     }
 
+    fn name(&self) -> &'static str {
+        "llvm"
+    }
+
     fn init(&self, sess: &Session) {
         llvm_util::init(sess); // Make sure llvm is inited
     }
@@ -244,16 +250,7 @@ impl CodegenBackend for LlvmCodegenBackend {
         match req.kind {
             PrintKind::RelocationModels => {
                 writeln!(out, "Available relocation models:").unwrap();
-                for name in &[
-                    "static",
-                    "pic",
-                    "pie",
-                    "dynamic-no-pic",
-                    "ropi",
-                    "rwpi",
-                    "ropi-rwpi",
-                    "default",
-                ] {
+                for name in RelocModel::ALL.iter().map(RelocModel::desc).chain(["default"]) {
                     writeln!(out, "    {name}").unwrap();
                 }
                 writeln!(out).unwrap();
@@ -267,9 +264,7 @@ impl CodegenBackend for LlvmCodegenBackend {
             }
             PrintKind::TlsModels => {
                 writeln!(out, "Available TLS models:").unwrap();
-                for name in
-                    &["global-dynamic", "local-dynamic", "initial-exec", "local-exec", "emulated"]
-                {
+                for name in TlsModel::ALL.iter().map(TlsModel::desc) {
                     writeln!(out, "    {name}").unwrap();
                 }
                 writeln!(out).unwrap();
@@ -359,7 +354,14 @@ impl CodegenBackend for LlvmCodegenBackend {
 
         // Run the linker on any artifacts that resulted from the LLVM run.
         // This should produce either a finished executable or library.
-        link_binary(sess, &LlvmArchiveBuilderBuilder, codegen_results, metadata, outputs);
+        link_binary(
+            sess,
+            &LlvmArchiveBuilderBuilder,
+            codegen_results,
+            metadata,
+            outputs,
+            self.name(),
+        );
     }
 }
 

@@ -8,7 +8,15 @@ attr_parsing_deprecated_item_suggestion =
 
 attr_parsing_empty_attribute =
     unused attribute
-    .suggestion = remove this attribute
+    .suggestion = {$valid_without_list ->
+        [true] remove these parentheses
+        *[other] remove this attribute
+    }
+    .note = {$valid_without_list ->
+        [true] using `{$attr_path}` with an empty list is equivalent to not using a list at all
+        *[other] using `{$attr_path}` with an empty list has no effect
+    }
+
 
 attr_parsing_invalid_target = `#[{$name}]` attribute cannot be used on {$target}
     .help = `#[{$name}]` can {$only}be applied to {$applied}
@@ -121,6 +129,14 @@ attr_parsing_non_ident_feature =
 attr_parsing_null_on_export = `export_name` may not contain null characters
 
 attr_parsing_null_on_link_section = `link_section` may not contain null characters
+
+attr_parsing_null_on_objc_class = `objc::class!` may not contain null characters
+
+attr_parsing_null_on_objc_selector = `objc::selector!` may not contain null characters
+
+attr_parsing_objc_class_expected_string_literal = `objc::class!` expected a string literal
+
+attr_parsing_objc_selector_expected_string_literal = `objc::selector!` expected a string literal
 
 attr_parsing_repr_ident =
     meta item in `repr` must be an identifier

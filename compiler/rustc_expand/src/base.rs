@@ -324,16 +324,16 @@ pub trait BangProcMacro {
 
 impl<F> BangProcMacro for F
 where
-    F: Fn(TokenStream) -> TokenStream,
+    F: Fn(&mut ExtCtxt<'_>, Span, TokenStream) -> Result<TokenStream, ErrorGuaranteed>,
 {
     fn expand<'cx>(
         &self,
-        _ecx: &'cx mut ExtCtxt<'_>,
-        _span: Span,
+        ecx: &'cx mut ExtCtxt<'_>,
+        span: Span,
         ts: TokenStream,
     ) -> Result<TokenStream, ErrorGuaranteed> {
         // FIXME setup implicit context in TLS before calling self.
-        Ok(self(ts))
+        self(ecx, span, ts)
     }
 }
 
@@ -942,9 +942,9 @@ impl SyntaxExtension {
                 .unwrap_or_default();
         let allow_internal_unsafe = find_attr!(attrs, AttributeKind::AllowInternalUnsafe(_));
 
-        let local_inner_macros = ast::attr::find_by_name(attrs, sym::macro_export)
-            .and_then(|macro_export| macro_export.meta_item_list())
-            .is_some_and(|l| ast::attr::list_contains_name(&l, sym::local_inner_macros));
+        let local_inner_macros =
+            *find_attr!(attrs, AttributeKind::MacroExport {local_inner_macros: l, ..} => l)
+                .unwrap_or(&false);
         let collapse_debuginfo = Self::get_collapse_debuginfo(sess, attrs, !is_local);
         tracing::debug!(?name, ?local_inner_macros, ?collapse_debuginfo, ?allow_internal_unsafe);
 
@@ -999,17 +999,14 @@ impl SyntaxExtension {
 
     /// A dummy bang macro `foo!()`.
     pub fn dummy_bang(edition: Edition) -> SyntaxExtension {
-        fn expander<'cx>(
-            cx: &'cx mut ExtCtxt<'_>,
+        fn expand(
+            ecx: &mut ExtCtxt<'_>,
             span: Span,
-            _: TokenStream,
-        ) -> MacroExpanderResult<'cx> {
-            ExpandResult::Ready(DummyResult::any(
-                span,
-                cx.dcx().span_delayed_bug(span, "expanded a dummy bang macro"),
-            ))
+            _ts: TokenStream,
+        ) -> Result<TokenStream, ErrorGuaranteed> {
+            Err(ecx.dcx().span_delayed_bug(span, "expanded a dummy bang macro"))
         }
-        SyntaxExtension::default(SyntaxExtensionKind::LegacyBang(Arc::new(expander)), edition)
+        SyntaxExtension::default(SyntaxExtensionKind::Bang(Arc::new(expand)), edition)
     }
 
     /// A dummy derive macro `#[derive(Foo)]`.

@@ -20,14 +20,15 @@ use crate::attributes::allow_unstable::{
 use crate::attributes::body::CoroutineParser;
 use crate::attributes::codegen_attrs::{
     ColdParser, CoverageParser, ExportNameParser, ForceTargetFeatureParser, NakedParser,
-    NoMangleParser, OptimizeParser, SanitizeParser, TargetFeatureParser, TrackCallerParser,
-    UsedParser,
+    NoMangleParser, ObjcClassParser, ObjcSelectorParser, OptimizeParser, SanitizeParser,
+    TargetFeatureParser, TrackCallerParser, UsedParser,
 };
 use crate::attributes::confusables::ConfusablesParser;
 use crate::attributes::crate_level::{
     CrateNameParser, MoveSizeLimitParser, NoCoreParser, NoStdParser, PatternComplexityLimitParser,
-    RecursionLimitParser, TypeLengthLimitParser,
+    RecursionLimitParser, RustcCoherenceIsCoreParser, TypeLengthLimitParser,
 };
+use crate::attributes::debugger::DebuggerViualizerParser;
 use crate::attributes::deprecation::DeprecationParser;
 use crate::attributes::dummy::DummyParser;
 use crate::attributes::inline::{InlineParser, RustcForceInlineParser};
@@ -40,7 +41,7 @@ use crate::attributes::lint_helpers::{
 };
 use crate::attributes::loop_match::{ConstContinueParser, LoopMatchParser};
 use crate::attributes::macro_attrs::{
-    AllowInternalUnsafeParser, MacroEscapeParser, MacroUseParser,
+    AllowInternalUnsafeParser, MacroEscapeParser, MacroExportParser, MacroUseParser,
 };
 use crate::attributes::must_use::MustUseParser;
 use crate::attributes::no_implicit_prelude::NoImplicitPreludeParser;
@@ -53,7 +54,7 @@ use crate::attributes::prototype::CustomMirParser;
 use crate::attributes::repr::{AlignParser, AlignStaticParser, ReprParser};
 use crate::attributes::rustc_internal::{
     RustcLayoutScalarValidRangeEnd, RustcLayoutScalarValidRangeStart,
-    RustcObjectLifetimeDefaultParser,
+    RustcObjectLifetimeDefaultParser, RustcSimdMonomorphizeLaneLimitParser,
 };
 use crate::attributes::semantics::MayDangleParser;
 use crate::attributes::stability::{
@@ -61,10 +62,10 @@ use crate::attributes::stability::{
 };
 use crate::attributes::test_attrs::{IgnoreParser, ShouldPanicParser};
 use crate::attributes::traits::{
-    AllowIncoherentImplParser, CoherenceIsCoreParser, CoinductiveParser, ConstTraitParser,
-    DenyExplicitImplParser, DoNotImplementViaObjectParser, FundamentalParser, MarkerParser,
-    ParenSugarParser, PointeeParser, SkipDuringMethodDispatchParser, SpecializationTraitParser,
-    TypeConstParser, UnsafeSpecializationMarkerParser,
+    AllowIncoherentImplParser, CoinductiveParser, ConstTraitParser, DenyExplicitImplParser,
+    DoNotImplementViaObjectParser, FundamentalParser, MarkerParser, ParenSugarParser,
+    PointeeParser, SkipDuringMethodDispatchParser, SpecializationTraitParser, TypeConstParser,
+    UnsafeSpecializationMarkerParser,
 };
 use crate::attributes::transparency::TransparencyParser;
 use crate::attributes::{AttributeParser as _, Combine, Single, WithoutArgs};
@@ -163,6 +164,7 @@ attribute_parsers!(
         // tidy-alphabetical-start
         Combine<AllowConstFnUnstableParser>,
         Combine<AllowInternalUnstableParser>,
+        Combine<DebuggerViualizerParser>,
         Combine<ForceTargetFeatureParser>,
         Combine<LinkParser>,
         Combine<ReprParser>,
@@ -183,8 +185,11 @@ attribute_parsers!(
         Single<LinkOrdinalParser>,
         Single<LinkSectionParser>,
         Single<LinkageParser>,
+        Single<MacroExportParser>,
         Single<MoveSizeLimitParser>,
         Single<MustUseParser>,
+        Single<ObjcClassParser>,
+        Single<ObjcSelectorParser>,
         Single<OptimizeParser>,
         Single<PathAttributeParser>,
         Single<PatternComplexityLimitParser>,
@@ -195,6 +200,7 @@ attribute_parsers!(
         Single<RustcLayoutScalarValidRangeEnd>,
         Single<RustcLayoutScalarValidRangeStart>,
         Single<RustcObjectLifetimeDefaultParser>,
+        Single<RustcSimdMonomorphizeLaneLimitParser>,
         Single<SanitizeParser>,
         Single<ShouldPanicParser>,
         Single<SkipDuringMethodDispatchParser>,
@@ -204,7 +210,6 @@ attribute_parsers!(
         Single<WithoutArgs<AllowInternalUnsafeParser>>,
         Single<WithoutArgs<AsPtrParser>>,
         Single<WithoutArgs<AutomaticallyDerivedParser>>,
-        Single<WithoutArgs<CoherenceIsCoreParser>>,
         Single<WithoutArgs<CoinductiveParser>>,
         Single<WithoutArgs<ColdParser>>,
         Single<WithoutArgs<ConstContinueParser>>,
@@ -232,6 +237,7 @@ attribute_parsers!(
         Single<WithoutArgs<ProcMacroAttributeParser>>,
         Single<WithoutArgs<ProcMacroParser>>,
         Single<WithoutArgs<PubTransparentParser>>,
+        Single<WithoutArgs<RustcCoherenceIsCoreParser>>,
         Single<WithoutArgs<SpecializationTraitParser>>,
         Single<WithoutArgs<StdInternalSymbolParser>>,
         Single<WithoutArgs<TrackCallerParser>>,
@@ -591,7 +597,12 @@ impl<'f, 'sess: 'f, S: Stage> AcceptContext<'f, 'sess, S> {
     }
 
     pub(crate) fn warn_empty_attribute(&mut self, span: Span) {
-        self.emit_lint(AttributeLintKind::EmptyAttribute { first_span: span }, span);
+        let attr_path = self.attr_path.clone();
+        let valid_without_list = self.template.word;
+        self.emit_lint(
+            AttributeLintKind::EmptyAttribute { first_span: span, attr_path, valid_without_list },
+            span,
+        );
     }
 }
 
