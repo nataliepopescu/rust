@@ -363,6 +363,20 @@ pub struct LinkEntry {
     pub import_name_type: Option<(PeImportNameType, Span)>,
 }
 
+#[derive(HashStable_Generic, PrintAttribute)]
+#[derive(Copy, PartialEq, PartialOrd, Clone, Ord, Eq, Hash, Debug, Encodable, Decodable)]
+pub enum DebuggerVisualizerType {
+    Natvis,
+    GdbPrettyPrinter,
+}
+
+#[derive(Debug, Encodable, Decodable, Clone, HashStable_Generic, PrintAttribute)]
+pub struct DebugVisualizer {
+    pub span: Span,
+    pub visualizer_type: DebuggerVisualizerType,
+    pub path: Symbol,
+}
+
 /// Represents parsed *built-in* inert attributes.
 ///
 /// ## Overview
@@ -444,9 +458,6 @@ pub enum AttributeKind {
         span: Span,
     },
 
-    /// Represents `#[rustc_coherence_is_core]`.
-    CoherenceIsCore,
-
     /// Represents `#[rustc_coinductive]`.
     Coinductive(Span),
 
@@ -488,7 +499,10 @@ pub enum AttributeKind {
     /// Represents `#[custom_mir]`.
     CustomMir(Option<(MirDialect, Span)>, Option<(MirPhase, Span)>, Span),
 
-    ///Represents `#[rustc_deny_explicit_impl]`.
+    /// Represents `#[debugger_visualizer]`.
+    DebuggerVisualizer(ThinVec<DebugVisualizer>),
+
+    /// Represents `#[rustc_deny_explicit_impl]`.
     DenyExplicitImpl(Span),
 
     /// Represents [`#[deprecated]`](https://doc.rust-lang.org/stable/reference/attributes/diagnostics.html#the-deprecated-attribute).
@@ -554,6 +568,9 @@ pub enum AttributeKind {
     /// Represents `#[macro_escape]`.
     MacroEscape(Span),
 
+    /// Represents [`#[macro_export]`](https://doc.rust-lang.org/reference/macros-by-example.html#r-macro.decl.scope.path).
+    MacroExport { span: Span, local_inner_macros: bool },
+
     /// Represents `#[rustc_macro_transparency]`.
     MacroTransparency(Transparency),
 
@@ -594,6 +611,12 @@ pub enum AttributeKind {
     /// Represents `#[non_exhaustive]`
     NonExhaustive(Span),
 
+    /// Represents `#[rustc_objc_class]`
+    ObjcClass { classname: Symbol, span: Span },
+
+    /// Represents `#[rustc_objc_selector]`
+    ObjcSelector { methname: Symbol, span: Span },
+
     /// Represents `#[optimize(size|speed)]`
     Optimize(OptimizeAttr, Span),
 
@@ -633,6 +656,9 @@ pub enum AttributeKind {
     /// Represents `#[rustc_builtin_macro]`.
     RustcBuiltinMacro { builtin_name: Option<Symbol>, helper_attrs: ThinVec<Symbol>, span: Span },
 
+    /// Represents `#[rustc_coherence_is_core]`
+    RustcCoherenceIsCore(Span),
+
     /// Represents `#[rustc_layout_scalar_valid_range_end]`.
     RustcLayoutScalarValidRangeEnd(Box<u128>, Span),
 
@@ -641,6 +667,9 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_object_lifetime_default]`.
     RustcObjectLifetimeDefault,
+
+    /// Represents `#[rustc_simd_monomorphize_lane_limit = "N"]`.
+    RustcSimdMonomorphizeLaneLimit(Limit),
 
     /// Represents `#[sanitize]`
     ///

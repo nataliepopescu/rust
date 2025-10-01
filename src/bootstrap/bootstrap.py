@@ -596,6 +596,7 @@ class RustBuild(object):
         self.download_url = (
             os.getenv("RUSTUP_DIST_SERVER") or self.stage0_data["dist_server"]
         )
+        self.jobs = self.get_toml("jobs", "build") or "default"
 
         self.build = args.build or self.build_triple()
 
@@ -1039,6 +1040,9 @@ class RustBuild(object):
         # See also: <https://github.com/rust-lang/rust/issues/70208>.
         if "CARGO_BUILD_TARGET" in env:
             del env["CARGO_BUILD_TARGET"]
+        # if in CI, don't use incremental build when building bootstrap.
+        if "GITHUB_ACTIONS" in env:
+            env["CARGO_INCREMENTAL"] = "0"
         env["CARGO_TARGET_DIR"] = build_dir
         env["RUSTC"] = self.rustc()
         env["LD_LIBRARY_PATH"] = (
@@ -1141,11 +1145,13 @@ class RustBuild(object):
         args = [
             self.cargo(),
             "build",
+            "--jobs=" + self.jobs,
             "--manifest-path",
             os.path.join(self.rust_root, "src/bootstrap/Cargo.toml"),
             "-Zroot-dir=" + self.rust_root,
         ]
-        args.extend("--verbose" for _ in range(self.verbose))
+        # verbose cargo output is very noisy, so only enable it with -vv
+        args.extend("--verbose" for _ in range(self.verbose - 1))
 
         if "BOOTSTRAP_TRACING" in env:
             args.append("--features=tracing")
@@ -1189,8 +1195,6 @@ class RustBuild(object):
             return "<commit>"
         cmd = [
             "git",
-            "-C",
-            repo_path,
             "rev-list",
             "--author",
             author_email,
@@ -1198,7 +1202,9 @@ class RustBuild(object):
             "HEAD",
         ]
         try:
-            commit = subprocess.check_output(cmd, universal_newlines=True).strip()
+            commit = subprocess.check_output(
+                cmd, universal_newlines=True, cwd=repo_path
+            ).strip()
             return commit or "<commit>"
         except subprocess.CalledProcessError:
             return "<commit>"

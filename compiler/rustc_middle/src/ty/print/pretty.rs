@@ -784,14 +784,12 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                 },
             },
             ty::Adt(def, args) => self.print_def_path(def.did(), args)?,
-            ty::Dynamic(data, r, repr) => {
+            ty::Dynamic(data, r) => {
                 let print_r = self.should_print_optional_region(r);
                 if print_r {
                     write!(self, "(")?;
                 }
-                match repr {
-                    ty::Dyn => write!(self, "dyn ")?,
-                }
+                write!(self, "dyn ")?;
                 data.print(self)?;
                 if print_r {
                     write!(self, " + ")?;
@@ -3179,8 +3177,7 @@ define_print! {
                 write!(p, "` can be evaluated")?;
             }
             ty::ClauseKind::UnstableFeature(symbol) => {
-                write!(p, "unstable feature: ")?;
-                write!(p, "`{symbol}`")?;
+                write!(p, "feature({symbol}) is enabled")?;
             }
         }
     }

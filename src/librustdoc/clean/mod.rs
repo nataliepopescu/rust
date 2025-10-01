@@ -212,18 +212,10 @@ fn generate_item_with_correct_attrs(
         // We only keep the item's attributes.
         target_attrs.iter().map(|attr| (Cow::Borrowed(attr), None)).collect()
     };
-    let cfg = extract_cfg_from_attrs(
-        attrs.iter().map(move |(attr, _)| match attr {
-            Cow::Borrowed(attr) => *attr,
-            Cow::Owned(attr) => attr,
-        }),
-        cx.tcx,
-        &cx.cache.hidden_cfg,
-    );
     let attrs = Attributes::from_hir_iter(attrs.iter().map(|(attr, did)| (&**attr, *did)), false);
 
     let name = renamed.or(Some(name));
-    let mut item = Item::from_def_id_and_attrs_and_parts(def_id, name, kind, attrs, cfg);
+    let mut item = Item::from_def_id_and_attrs_and_parts(def_id, name, kind, attrs, None);
     // FIXME (GuillaumeGomez): Should we also make `inline_stmt_id` a `Vec` instead of an `Option`?
     item.inner.inline_stmt_id = import_ids.first().copied();
     item
@@ -2093,7 +2085,7 @@ pub(crate) fn clean_middle_ty<'tcx>(
             );
             Type::Path { path }
         }
-        ty::Dynamic(obj, reg, _) => {
+        ty::Dynamic(obj, reg) => {
             // HACK: pick the first `did` as the `did` of the trait object. Someone
             // might want to implement "native" support for marker-trait-only
             // trait objects.

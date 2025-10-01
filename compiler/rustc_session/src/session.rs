@@ -600,6 +600,13 @@ impl Session {
 
     /// Calculates the flavor of LTO to use for this compilation.
     pub fn lto(&self) -> config::Lto {
+        // Autodiff currently requires fat-lto to have access to the llvm-ir of all (indirectly) used functions and types.
+        // fat-lto is the easiest solution to this requirement, but quite expensive.
+        // FIXME(autodiff): Make autodiff also work with embed-bc instead of fat-lto.
+        if self.opts.autodiff_enabled() {
+            return config::Lto::Fat;
+        }
+
         // If our target has codegen requirements ignore the command line
         if self.target.requires_lto {
             return config::Lto::Fat;
@@ -770,9 +777,11 @@ impl Session {
         // Otherwise, we can defer to the `-C force-unwind-tables=<yes/no>`
         // value, if it is provided, or disable them, if not.
         self.target.requires_uwtable
-            || self.opts.cg.force_unwind_tables.unwrap_or(
-                self.panic_strategy() == PanicStrategy::Unwind || self.target.default_uwtable,
-            )
+            || self
+                .opts
+                .cg
+                .force_unwind_tables
+                .unwrap_or(self.panic_strategy().unwinds() || self.target.default_uwtable)
     }
 
     /// Returns the number of query threads that should be used for this
@@ -1222,7 +1231,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     }
 
     // KCFI requires panic=abort
-    if sess.is_sanitizer_kcfi_enabled() && sess.panic_strategy() != PanicStrategy::Abort {
+    if sess.is_sanitizer_kcfi_enabled() && sess.panic_strategy().unwinds() {
         sess.dcx().emit_err(errors::SanitizerKcfiRequiresPanicAbort);
     }
 

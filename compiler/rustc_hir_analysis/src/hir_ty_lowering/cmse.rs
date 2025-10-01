@@ -85,6 +85,12 @@ pub(crate) fn validate_cmse_abi<'tcx>(
                 return;
             };
 
+            // An `extern "cmse-nonsecure-entry"` function cannot be c-variadic. We run
+            // into https://github.com/rust-lang/rust/issues/132142 if we don't explicitly bail.
+            if decl.c_variadic {
+                return;
+            }
+
             match is_valid_cmse_inputs(tcx, fn_sig) {
                 Ok(Ok(())) => {}
                 Ok(Err(index)) => {
@@ -132,7 +138,7 @@ fn is_valid_cmse_inputs<'tcx>(
     for (index, ty) in fn_sig.inputs().iter().enumerate() {
         let layout = tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(*ty))?;
 
-        let align = layout.layout.align().abi.bytes();
+        let align = layout.layout.align().bytes();
         let size = layout.layout.size().bytes();
 
         accum += size;
@@ -213,6 +219,7 @@ fn should_emit_generic_error<'tcx>(abi: ExternAbi, layout_err: &'tcx LayoutError
         }
         Unknown(..)
         | SizeOverflow(..)
+        | InvalidSimd { .. }
         | NormalizationFailure(..)
         | ReferencesError(..)
         | Cycle(..) => {

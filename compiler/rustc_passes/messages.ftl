@@ -93,15 +93,6 @@ passes_dead_codes =
        }
     } never {$participle}
 
-passes_debug_visualizer_invalid =
-    invalid argument
-    .note_1 = expected: `natvis_file = "..."`
-    .note_2 = OR
-    .note_3 = expected: `gdb_script_file = "..."`
-
-passes_debug_visualizer_placement =
-    attribute should be applied to a module
-
 passes_debug_visualizer_unreadable =
     couldn't read {$file}: {$error}
 
@@ -149,8 +140,17 @@ passes_doc_attribute_not_attribute =
     nonexistent builtin attribute `{$attribute}` used in `#[doc(attribute = "...")]`
     .help = only existing builtin attributes are allowed in core/std
 
-passes_doc_cfg_hide_takes_list =
-    `#[doc(cfg_hide(...))]` takes a list of attributes
+passes_doc_auto_cfg_expects_hide_or_show =
+    only `hide` or `show` are allowed in `#[doc(auto_cfg(...))]`
+
+passes_doc_auto_cfg_hide_show_expects_list =
+    `#![doc(auto_cfg({$attr_name}(...)))]` expects a list of items
+
+passes_doc_auto_cfg_hide_show_unexpected_item =
+    `#![doc(auto_cfg({$attr_name}(...)))]` only accepts identifiers or key/value items
+
+passes_doc_auto_cfg_wrong_literal =
+    expected boolean for `#[doc(auto_cfg = ...)]`
 
 passes_doc_expect_str =
     doc {$attr_name} attribute expects a string: #[doc({$attr_name} = "a")]
@@ -349,10 +349,6 @@ passes_invalid_attr_at_crate_level =
 passes_invalid_attr_at_crate_level_item =
     the inner attribute doesn't annotate this {$kind}
 
-passes_invalid_macro_export_arguments = invalid `#[macro_export]` argument
-
-passes_invalid_macro_export_arguments_too_many_items = `#[macro_export]` can only take 1 or 0 arguments
-
 passes_lang_item_fn = {$name ->
     [panic_impl] `#[panic_handler]`
     *[other] `{$name}` lang item
@@ -391,9 +387,6 @@ passes_link =
 passes_loop_match_attr =
     `#[loop_match]` should be applied to a loop
     .label = not a loop
-
-passes_macro_export =
-    `#[macro_export]` only has an effect on macro definitions
 
 passes_macro_export_on_decl_macro =
     `#[macro_export]` has no effect on declarative macro definitions

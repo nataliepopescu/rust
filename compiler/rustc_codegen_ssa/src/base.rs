@@ -11,12 +11,12 @@ use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_data_structures::profiling::{get_resident_set_size, print_time_passes_entry};
 use rustc_data_structures::sync::{IntoDynSyncSend, par_map};
 use rustc_data_structures::unord::UnordMap;
-use rustc_hir::attrs::OptimizeAttr;
+use rustc_hir::attrs::{DebuggerVisualizerType, OptimizeAttr};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{ItemId, Target};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
-use rustc_middle::middle::debugger_visualizer::{DebuggerVisualizerFile, DebuggerVisualizerType};
+use rustc_middle::middle::debugger_visualizer::DebuggerVisualizerFile;
 use rustc_middle::middle::dependency_format::Dependencies;
 use rustc_middle::middle::exported_symbols::{self, SymbolExportKind};
 use rustc_middle::middle::lang_items;
@@ -168,9 +168,7 @@ fn unsized_info<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         (&ty::Array(_, len), &ty::Slice(_)) => cx.const_usize(
             len.try_to_target_usize(cx.tcx()).expect("expected monomorphic const in codegen"),
         ),
-        (&ty::Dynamic(data_a, _, src_dyn_kind), &ty::Dynamic(data_b, _, target_dyn_kind))
-            if src_dyn_kind == target_dyn_kind =>
-        {
+        (&ty::Dynamic(data_a, _), &ty::Dynamic(data_b, _)) => {
             let old_info =
                 old_info.expect("unsized_info: missing old info for trait upcasting coercion");
             let b_principal_def_id = data_b.principal_def_id();
@@ -208,7 +206,7 @@ fn unsized_info<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 old_info
             }
         }
-        (_, ty::Dynamic(data, _, _)) => meth::get_vtable(
+        (_, ty::Dynamic(data, _)) => meth::get_vtable(
             cx,
             source,
             data.principal()
