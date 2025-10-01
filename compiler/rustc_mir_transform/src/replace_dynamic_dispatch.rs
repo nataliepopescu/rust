@@ -381,6 +381,7 @@ fn replace_dynamic_dispatch<'tcx>(
         dynmetadata_cat_ref_loc,
         first_eq_res_loc,
         traitobj_did,
+        false,
         boxed_dyn_traitobj_loc1,
     );
     assert_eq!(bb_first_compare_exp, bb_first_compare_act);
@@ -446,6 +447,7 @@ fn replace_dynamic_dispatch<'tcx>(
         dynmetadata_dog_ref_loc,
         second_eq_res_loc,
         traitobj_did,
+        true,
         boxed_dyn_traitobj_loc1,
     );
     assert_eq!(bb_second_compare_exp, bb_second_compare_act);
@@ -748,7 +750,7 @@ fn add_speak_block<'tcx>(
         ))),
     ));
 
-    // transmute raw_animal copy into &Cat
+    // transmute raw_animal copy into &concrete_ty
     let cat_adt_def = tcx.adt_def(concrete_ty_did);
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
@@ -848,6 +850,7 @@ fn add_compare_vtable_block<'tcx>(
     dynmetadata_concretety_ref_loc: Local,
     eq_res_loc: Local,
     traitobj_did: DefId,
+    done_copy: bool,
     free1: Local,
 ) -> BasicBlock {
     // /////////////////////////
@@ -877,10 +880,13 @@ fn add_compare_vtable_block<'tcx>(
         ))),
     ));
 
-    stmts.push(Statement::new(
-        dummy_source_info(),
-        StatementKind::StorageDead(mut_dyn_traitobj_loc),
-    ));
+    debug!("DONE_COPY: {:?}", done_copy);
+    if done_copy {
+        stmts.push(Statement::new(
+            dummy_source_info(),
+            StatementKind::StorageDead(mut_dyn_traitobj_loc),
+        ));
+    }
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::StorageLive(dynmetadata_traitobj_ref_loc),
@@ -1692,34 +1698,32 @@ fn id_term<'tcx>(tcx: TyCtxt<'tcx>, kind: &TerminatorKind<'tcx>) {
             debug!("unwind: {:?}", unwind_act);
             debug!("call_source: {:?}", callsource);
             debug!("fn_span: {:?}", span);
-            /*
-            for (i, arg) in op_args.into_iter().enumerate() {
-                if i != 0 {
-                    continue;
-                }
-                match &arg.node {
-                    Operand::Move(place)
-                    | Operand::Copy(place) => {
-                        debug!("ArgOp: Move/Copy");
-                        let place_ty = place.ty(local_decls, tcx);
-                        let deref = place_ty.ty.builtin_deref(false);
-                        // FIXME this check also admits static dispatch
-                        // calls that simply happen to have a trait
-                        // object as their first argument
-                        // (e.g. Box::into_raw() takes in the trait
-                        // object we want to convert into a raw ptr)
-                        // TODO how else to differentiate?
-                        if deref.is_some() && deref.unwrap().is_trait() {
-                            debug!("-----REPLACE");
-                            debug!("deref: {:?}", deref.unwrap());
-                            //debug!("ptr_metadata_ty: {:?}", deref.unwrap().ptr_metadata_ty(tcx, |ty| ty));
-                            debug!("\n\n\n\n\n\n\n");
-                        }
-                    },
-                    Operand::Constant(_) => debug!("ArgOp: Const"),
-                }
-            }
-            */
+            //for (i, arg) in op_args.into_iter().enumerate() {
+            //    if i != 0 {
+            //        continue;
+            //    }
+            //    match &arg.node {
+            //        Operand::Move(place)
+            //        | Operand::Copy(place) => {
+            //            debug!("ArgOp: Move/Copy");
+            //            let place_ty = place.ty(local_decls, tcx);
+            //            let deref = place_ty.ty.builtin_deref(false);
+            //            // FIXME this check also admits static dispatch
+            //            // calls that simply happen to have a trait
+            //            // object as their first argument
+            //            // (e.g. Box::into_raw() takes in the trait
+            //            // object we want to convert into a raw ptr)
+            //            // TODO how else to differentiate?
+            //            if deref.is_some() && deref.unwrap().is_trait() {
+            //                debug!("-----REPLACE");
+            //                debug!("deref: {:?}", deref.unwrap());
+            //                //debug!("ptr_metadata_ty: {:?}", deref.unwrap().ptr_metadata_ty(tcx, |ty| ty));
+            //                debug!("\n\n\n\n\n\n\n");
+            //            }
+            //        },
+            //        Operand::Constant(_) => debug!("ArgOp: Const"),
+            //    }
+            //}
         }
         TerminatorKind::SwitchInt { discr: op, targets: switchtargets } => {
             debug!("SwitchInt");
@@ -1743,3 +1747,4 @@ fn id_term<'tcx>(tcx: TyCtxt<'tcx>, kind: &TerminatorKind<'tcx>) {
         _ => debug!("another"),
     }
 }
+
