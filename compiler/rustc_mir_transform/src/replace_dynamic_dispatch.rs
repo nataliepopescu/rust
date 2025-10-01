@@ -559,7 +559,7 @@ fn make_dyn_traitobj_tykind<'tcx>(tcx: TyCtxt<'tcx>, traitobj_did: DefId) -> TyK
         ExistentialPredicate::Trait(ExistentialTraitRef::new(tcx, traitobj_did, dummy_args)),
     )]);
 
-    Dynamic(pep_list, Region::new_from_kind(tcx, RegionKind::ReErased), DynKind::Dyn)
+    Dynamic(pep_list, Region::new_from_kind(tcx, RegionKind::ReErased))
 }
 
 fn make_dynmetadata_adt<'tcx>(tcx: TyCtxt<'tcx>, traitobj_did: DefId) -> Ty<'tcx> {
@@ -1431,10 +1431,9 @@ fn id_ty<'tcx>(ty: Ty<'tcx>) {
         crate::ty::FnDef(..) => debug!("FnDef"),
         crate::ty::FnPtr(..) => debug!("FnPtr"),
         crate::ty::UnsafeBinder(..) => debug!("UnsafeBinder"),
-        crate::ty::Dynamic(rawlist, region, dynkind) => {
+        crate::ty::Dynamic(rawlist, region) => {
             debug!("Dynamic");
             debug!("region: {:?}", region.kind());
-            debug!("dynkind: {:?}", dynkind);
             debug!("rawlist...");
             for (i, binder) in rawlist.iter().enumerate() {
                 debug!("--idx: {:?}", i);
