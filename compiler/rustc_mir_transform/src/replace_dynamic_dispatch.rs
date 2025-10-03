@@ -22,23 +22,40 @@ use crate::patch::MirPatch;
 
 pub(super) struct ReplaceDynamicDispatch;
 
+const DUMMY_DEFID: DefId = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
+
+// FIXME change from magic num -> dynamic
+
+const METADATA_FN_DEFID: DefId = DefId { index: DefIndex::from_u32(2449), krate: CrateNum::from_u32(2) };
+const INTO_RAW_FN_DEFID: DefId = DefId { index: DefIndex::from_u32(731), krate: CrateNum::from_u32(3) };
+const EQ_FN_DEFID: DefId = DefId { index: DefIndex::from_u32(3216), krate: CrateNum::from_u32(2) };
+const UNIQUE_ADT_DEFID: DefId = DefId { index: DefIndex::from_u32(2674), krate: CrateNum::from_u32(2) };
+const NONNULL_ADT_DEFID: DefId = DefId { index: DefIndex::from_u32(2529), krate: CrateNum::from_u32(2) };
+
 impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let mut patch = MirPatch::new(body);
 
         debug!("for func @ {:?}", body.span);
-        debug!("LOCALS BEFORE ({:?})", body.local_decls().len());
-        for (idx, local_decl) in body.local_decls().iter_enumerated() {
-            debug!("-------idx: {:?}", idx);
-            debug!("local_decl: {:?}", local_decl);
-            debug!("mutability: {:?}", local_decl.mutability);
-            debug!("ty: {:?}", local_decl.ty);
-            id_ty(local_decl.ty);
-        }
+        //debug!("LOCALS BEFORE ({:?})", body.local_decls().len());
+        //for (idx, local_decl) in body.local_decls().iter_enumerated() {
+        //    debug!("-------idx: {:?}", idx);
+        //    debug!("local_decl: {:?}", local_decl);
+        //    debug!("mutability: {:?}", local_decl.mutability);
+        //    debug!("ty: {:?}", local_decl.ty);
+        //    id_ty(local_decl.ty);
+        //}
+
+        //debug!("--START GET DEFIDS--");
+        //debug!("{:?}", tcx.all_diagnostic_items(()));
+        //debug!("--END GET DEFIDS--");
 
         debug!("RUN PASS");
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             debug!("BB: {:?}", bb);
+            for stmt in &data.statements{
+                id_stmt(&stmt.kind);
+            }
             id_term(tcx, &data.terminator().kind);
             match &data.terminator().kind {
                 TerminatorKind::Call { func, .. } => {
@@ -80,8 +97,7 @@ fn get_dids<'tcx>(
     // dummy init value b/c the compiler thinks we can
     // proceed with an uninit value despite the `init` flag
     let mut init = false;
-    // FIXME
-    let mut fn_did = DefId { index: DefIndex::from_u32(0), krate: CrateNum::from_u32(0) };
+    let mut fn_did = DUMMY_DEFID;
     for assoc_item in tcx.associated_items(assoc_items_did).in_definition_order() {
         debug!("assoc_item: {:?}", assoc_item);
         debug!("assoc_item.def_id: {:?}", assoc_item.def_id);
@@ -952,7 +968,7 @@ fn add_compare_vtable_block<'tcx>(
                     ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
-                        DefId { index: DefIndex::from_u32(3219), krate: CrateNum::from_u32(2) },
+                        EQ_FN_DEFID,
                         gen_args_ref,
                     ),
                 ),
@@ -1031,8 +1047,7 @@ fn add_into_raw_block<'tcx>(
     // add terminator
     let dyn_traitobj_tykind = make_dyn_traitobj_tykind(tcx, traitobj_did);
     let dyn_traitobj_ty = tcx.mk_ty_from_kind(dyn_traitobj_tykind);
-    let boxed_dyn_traitobj_ty = Ty::new_box(tcx, dyn_traitobj_ty);
-    let gen_args_ref = tcx.mk_args(&[GenericArg::from(boxed_dyn_traitobj_ty)]);
+    let gen_args_ref = tcx.mk_args(&[GenericArg::from(dyn_traitobj_ty)]);
 
     let args: Box<[Spanned<Operand<'tcx>>]> = Box::new([Spanned {
         node: Operand::Move(Place { local: boxed_dyn_traitobj_loc, projection: empty_proj }),
@@ -1049,7 +1064,7 @@ fn add_into_raw_block<'tcx>(
                     ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
-                        DefId { index: DefIndex::from_u32(730), krate: CrateNum::from_u32(3) },
+                        INTO_RAW_FN_DEFID,
                         gen_args_ref,
                     ),
                 ),
@@ -1097,10 +1112,8 @@ fn add_ptr_metadata_block<'tcx>(
     let deref_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[ProjectionElem::Deref];
     let deref_proj = tcx.mk_place_elems(deref_proj_slice);
 
-    let unique_adt_def =
-        tcx.adt_def(DefId { index: DefIndex::from_u32(2677), krate: CrateNum::from_u32(2) });
-    let nonnull_adt_def =
-        tcx.adt_def(DefId { index: DefIndex::from_u32(2532), krate: CrateNum::from_u32(2) });
+    let unique_adt_def = tcx.adt_def(UNIQUE_ADT_DEFID);
+    let nonnull_adt_def = tcx.adt_def(NONNULL_ADT_DEFID);
     let gen_args_ref = tcx.mk_args(&[GenericArg::from(dyn_traitobj_ty)]);
     let fields_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[
         ProjectionElem::Field(
@@ -1179,7 +1192,7 @@ fn add_ptr_metadata_block<'tcx>(
                     ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
-                        DefId { index: DefIndex::from_u32(2452), krate: CrateNum::from_u32(2) },
+                        METADATA_FN_DEFID,
                         gen_args_ref,
                     ),
                 ),
@@ -1362,7 +1375,7 @@ fn replace_term_ptrmetadata_call<'tcx>(
                     ConstValue::ZeroSized,
                     Ty::new_fn_def(
                         tcx,
-                        DefId { index: DefIndex::from_u32(2452), krate: CrateNum::from_u32(2) },
+                        METADATA_FN_DEFID,
                         gen_args_ref,
                     ),
                 ),
