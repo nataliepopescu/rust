@@ -63,7 +63,7 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
             match &data.terminator().kind {
                 TerminatorKind::Call { func, .. } => {
                     if let Some((defid, rawlist)) = func.const_fn_def() {
-                        if tcx.def_path_debug_str(defid).contains("Animal::speak") {
+                        if tcx.def_path_debug_str(defid).contains("Animal::kaeps") {
                             let ty = rawlist.type_at(0);
                             id_ty(ty);
                             if ty.is_trait() {
@@ -1764,7 +1764,7 @@ fn id_term<'tcx>(tcx: TyCtxt<'tcx>, kind: &TerminatorKind<'tcx>) {
                                     debug!("def_kind: {:?}", tcx.def_kind(defid));
 
                                     //debug!("dbg string: {:?}", tcx.def_path_debug_str(*defid));
-                                    //if tcx.def_path_debug_str(*defid).contains("Animal::speak") {
+                                    //if tcx.def_path_debug_str(*defid).contains("Animal::kaeps") {
                                     //    debug!("HARDCODED FIND");
                                     //    let first_ty = rawlist.type_at(0);
                                     //    debug!("***TYPE[0]: {:?}", first_ty);
