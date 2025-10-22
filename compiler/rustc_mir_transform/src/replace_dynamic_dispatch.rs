@@ -197,7 +197,7 @@ fn replace_dynamic_dispatch<'tcx>(
 
     // get old terminator's edges
     let edges = data.terminator().kind.edges();
-    let bb_old_return;
+    let bb_old_next;
     let bb_old_cleanup;
     match edges {
         TerminatorEdges::AssignOnReturn { return_, cleanup, .. } => {
@@ -208,7 +208,7 @@ fn replace_dynamic_dispatch<'tcx>(
             if cleanup.is_none() {
                 debug!("CLN: no cleanup");
             }
-            bb_old_return = return_[0];
+            bb_old_next= return_[0];
             bb_old_cleanup = cleanup.unwrap();
         }
         _ => {
@@ -216,6 +216,8 @@ fn replace_dynamic_dispatch<'tcx>(
             panic!("verifopt: need to set terminator edges");
         }
     }
+
+    let bb_old_return = bb_old_next + 1;
 
     // /////////////////////////
     // add / modify blocks (+ add necessary locals)
