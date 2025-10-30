@@ -2,8 +2,10 @@
 //! statically dispatched function calls.
 
 #![allow(dead_code)]
-//#![allow(unused_variables)]
-#![allow(rustc::default_hash_types)]
+#![allow(unused_variables)]
+
+//#![allow(rustc::default_hash_types)]
+//use std::collections::HashSet;
 
 //use std::ops::Index;
 
@@ -18,7 +20,6 @@ use rustc_span::def_id::*;
 use rustc_span::source_map::Spanned;
 use rustc_span::*;
 use tracing::debug;
-use std::collections::HashSet;
 
 use crate::patch::MirPatch;
 
@@ -39,7 +40,7 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let mut patch = MirPatch::new(body);
 
-        debug!("for func @ {:?}", body.span);
+        //debug!("for func @ {:?}", body.span);
         //debug!("LOCALS BEFORE ({:?})", body.local_decls().len());
         //for (idx, local_decl) in body.local_decls().iter_enumerated() {
         //    debug!("-------idx: {:?}", idx);
@@ -53,23 +54,23 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
         //debug!("{:?}", tcx.all_diagnostic_items(()));
         //debug!("--END GET DEFIDS--");
 
-        debug!("RUN PASS");
+        //debug!("RUN PASS");
         for (bb, data) in body.basic_blocks.iter_enumerated() {
-            debug!("BB: {:?}", bb);
-            for stmt in &data.statements{
-                id_stmt(&stmt.kind);
-            }
-            id_term(tcx, &data.terminator().kind);
+            //debug!("BB: {:?}", bb);
+            //for stmt in &data.statements{
+            //    id_stmt(&stmt.kind);
+            //}
+            //id_term(tcx, &data.terminator().kind);
             match &data.terminator().kind {
                 TerminatorKind::Call { func, .. } => {
                     if let Some((defid, rawlist)) = func.const_fn_def() {
                         if tcx.def_path_debug_str(defid).contains("Animal::kaeps") {
                             let ty = rawlist.type_at(0);
-                            id_ty(ty);
+                            //id_ty(ty);
                             if ty.is_trait() {
-                                debug!("ty: {:?}", ty);
+                                //debug!("ty: {:?}", ty);
                                 let num_bbs = body.basic_blocks.len();
-                                replace_dynamic_dispatch(tcx, &mut patch, ty, bb, data, num_bbs);
+                                replace_dynamic_dispatch_bmarks(tcx, &mut patch, ty, bb, data, num_bbs);
                             }
                         }
                     }
@@ -102,8 +103,8 @@ fn get_dids<'tcx>(
     let mut init = false;
     let mut fn_did = DUMMY_DEFID;
     for assoc_item in tcx.associated_items(assoc_items_did).in_definition_order() {
-        debug!("assoc_item: {:?}", assoc_item);
-        debug!("assoc_item.def_id: {:?}", assoc_item.def_id);
+        //debug!("assoc_item: {:?}", assoc_item);
+        //debug!("assoc_item.def_id: {:?}", assoc_item.def_id);
         fn_did = assoc_item.def_id;
         init = true;
     }
@@ -112,6 +113,199 @@ fn get_dids<'tcx>(
     }
 
     (*ty_did, fn_did)
+}
+
+fn get_bbs<'tcx>(
+    data: &BasicBlockData<'tcx>,
+) -> (BasicBlock, BasicBlock) {
+    let edges = data.terminator().kind.edges();
+    let bb_old_next;
+    let bb_old_cleanup;
+    match edges {
+        TerminatorEdges::AssignOnReturn { return_, cleanup, .. } => {
+            //debug!("edges problems?");
+            if return_.len() > 1 {
+                panic!("RET: multiple return blocks");
+            }
+            if cleanup.is_none() {
+                panic!("CLN: no cleanup");
+            }
+            bb_old_next = return_[0];
+            bb_old_cleanup = cleanup.unwrap();
+        }
+        _ => {
+            panic!("verifopt: need to set terminator edges");
+        }
+    }
+    (bb_old_next, bb_old_cleanup)
+}
+
+fn get_traitobj_did<'tcx>(
+    ty: Ty<'tcx>,
+) -> DefId {
+    let traitobj_did: Option<DefId>;
+    match ty.kind() {
+        Dynamic(rawlist, ..) => {
+            if rawlist.len() > 0 {
+                let principal_did_opt = (*rawlist).principal_def_id();
+                if let Some(did) = principal_did_opt {
+                    traitobj_did = Some(did);
+                } else {
+                    panic!("auto traits only - nothing to replace");
+                }
+            } else {
+                traitobj_did = None;
+            }
+        }
+        // realistically can just return, but panicking for now to see
+        // if this is ever triggered
+        _ => panic!("trait is not Dynamic"),
+    }
+    if traitobj_did.is_none() {
+        panic!("no traitobj_did found");
+    }
+    traitobj_did.unwrap()
+}
+
+fn replace_dynamic_dispatch_bmarks<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    ty: Ty<'tcx>,
+    bb: BasicBlock,
+    data: &BasicBlockData<'tcx>,
+    num_bbs: usize,
+) {
+    // get old terminator's edges
+    let (bb_old_next, bb_old_cleanup) = get_bbs(data);
+    // TODO how to check if returning something or not?
+    // if no return value, let bb_old_return = bb_old_next;
+    let bb_old_return = bb_old_next + 1;
+    let bb_into_raw_exp = BasicBlock::from_usize(num_bbs);
+
+    let traitobj_did = get_traitobj_did(ty);
+
+    let impls = tcx.trait_impls_of(traitobj_did);
+    let nb_impls_dids = impls.non_blanket_impls();
+    let impls_keys: Vec<_> = nb_impls_dids.keys().collect();
+    let impls_vals: Vec<_> = nb_impls_dids.values().collect();
+    let (cat_did, cat_speak_did) =
+        get_dids(tcx, impls_keys.get(0).unwrap(), impls_vals.get(0).unwrap().as_slice()[0]);
+    let (dog_did, dog_speak_did) =
+        get_dids(tcx, impls_keys.get(1).unwrap(), impls_vals.get(1).unwrap().as_slice()[0]);
+
+    assert_eq!(bb_old_next.as_usize(), 1);
+    assert_eq!(bb_old_cleanup.as_usize(), 3);
+    assert_eq!(bb_into_raw_exp.as_usize(), 5);
+
+    let retval = Local::from_u32(0);
+    let animal = Local::from_u32(1);
+    let animal_vtable = Local::from_u32(2);
+    let cat_vtable = Local::from_u32(3);
+
+    // mod cur speak block w/ goto new start (into_raw)
+    replace_dyndispatch_term_w_goto(tcx, patch, bb, bb_into_raw_exp);
+
+    // into_raw
+    let mut_dyn_traitobj = add_mut_dyn_traitobj_temp(tcx, patch, traitobj_did);
+    let boxed_dyn_traitobj1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did);
+
+    let bb_first_compare_exp = BasicBlock::from_usize(bb_into_raw_exp.as_usize() + 1);
+    let bb_into_raw_act = add_into_raw_block(
+        tcx,
+        patch,
+        bb_first_compare_exp,
+        bb_old_cleanup,
+        mut_dyn_traitobj,
+        boxed_dyn_traitobj1,
+        animal,
+        traitobj_did,
+        None,
+    );
+    assert_eq!(bb_into_raw_act, bb_into_raw_exp);
+
+    // TODO for loop -> compare/switch blocks (n-1)
+
+    // TODO for loop -> speak/goto blocks (n)
+
+    // first_comparison
+    let raw_traitobj1 = add_raw_traitobj_temp(tcx, patch);
+    let animal_vtable_ref = add_dynmetadata_ref_temp(tcx, patch, traitobj_did);
+    let cat_vtable_ref = add_dynmetadata_ref_temp(tcx, patch, traitobj_did);
+    let first_eq_res = add_mut_bool_temp(tcx, patch);
+
+    let bb_first_switch_exp = BasicBlock::from_usize(bb_first_compare_exp.as_usize() + 1);
+    let bb_first_compare_act = add_compare_vtable_block(
+        tcx,
+        patch,
+        bb_first_switch_exp,
+        bb_old_cleanup,
+        raw_traitobj1,
+        mut_dyn_traitobj,
+        animal_vtable,
+        animal_vtable_ref,
+        cat_vtable,
+        cat_vtable_ref,
+        first_eq_res,
+        traitobj_did,
+        false,
+        Some(vec![boxed_dyn_traitobj1]),
+    );
+    assert_eq!(bb_first_compare_act, bb_first_compare_exp);
+
+    // first_switch
+    let bb_cat_speak_exp = BasicBlock::from_usize(bb_first_switch_exp.as_usize() + 1);
+    let bb_dog_speak_exp = BasicBlock::from_usize(bb_cat_speak_exp.as_usize() + 2);
+    let bb_first_switch_act =
+        add_switch_block(tcx, patch, bb_cat_speak_exp, bb_dog_speak_exp, first_eq_res);
+    assert_eq!(bb_first_switch_exp, bb_first_switch_act);
+
+    // first_speak
+    let raw_traitobj2 = add_raw_traitobj_temp(tcx, patch);
+    let cat_obj = add_concretety_ref_temp(tcx, patch, cat_did);
+
+    let bb_cat_ret_exp = BasicBlock::from_usize(bb_cat_speak_exp.as_usize() + 1);
+    let bb_cat_speak_act = add_speak_block(
+        tcx,
+        patch,
+        bb_cat_ret_exp,
+        bb_old_cleanup,
+        raw_traitobj1,
+        raw_traitobj2,
+        retval,
+        cat_obj,
+        cat_did,
+        cat_speak_did,
+        None,
+    );
+    assert_eq!(bb_cat_speak_exp, bb_cat_speak_act);
+
+    // goto (to bb_old_return)
+    let bb_cat_ret_act = add_goto_block(tcx, patch, bb_old_return);
+    assert_eq!(bb_cat_ret_exp, bb_cat_ret_act);
+
+    // second_speak
+    let raw_traitobj4 = add_raw_traitobj_temp(tcx, patch);
+    let dog_obj = add_concretety_ref_temp(tcx, patch, dog_did);
+
+    let bb_dog_ret_exp = BasicBlock::from_usize(bb_dog_speak_exp.as_usize() + 1);
+    let bb_dog_speak_act = add_speak_block(
+        tcx,
+        patch,
+        bb_dog_ret_exp,
+        bb_old_cleanup,
+        raw_traitobj1,
+        raw_traitobj4,
+        retval,
+        dog_obj,
+        dog_did,
+        dog_speak_did,
+        None,
+    );
+    assert_eq!(bb_dog_speak_exp, bb_dog_speak_act);
+
+    // goto (to bb_old_return)
+    let bb_dog_ret_act = add_goto_block(tcx, patch, bb_old_return);
+    assert_eq!(bb_dog_ret_exp, bb_dog_ret_act);
 }
 
 fn replace_dynamic_dispatch<'tcx>(
@@ -126,25 +320,7 @@ fn replace_dynamic_dispatch<'tcx>(
 
     // TODO make top-level empty_projs + dummy_spans
 
-    let traitobj_did: DefId;
-    match ty.kind() {
-        Dynamic(rawlist, ..) => {
-            if rawlist.len() > 0 {
-                let principal_did_opt = (*rawlist).principal_def_id();
-                if let Some(did) = principal_did_opt {
-                    traitobj_did = did;
-                } else {
-                    debug!("auto traits only - nothing to replace");
-                    return;
-                }
-            } else {
-                return;
-            }
-        }
-        // realistically can just return, but panicking for now to see
-        // if this is ever triggered
-        _ => panic!("trait is not Dynamic"),
-    }
+    let traitobj_did = get_traitobj_did(ty);
 
     // get trait impl defids
     // alternatively, replace trait_impls_of() => all_impls()
@@ -177,45 +353,29 @@ fn replace_dynamic_dispatch<'tcx>(
     //
     // _22 == &dyn Animal (arg to old dynamic speak() call)
 
-    let cat_trait_ref = tcx.impl_trait_ref(impls_vals.get(0).unwrap().as_slice()[0]).unwrap().skip_binder();
-    let dog_trait_ref = tcx.impl_trait_ref(impls_vals.get(1).unwrap().as_slice()[0]).unwrap().skip_binder();
-    debug!("cat trait_ref: {:?}", cat_trait_ref);
-    debug!("dog trait_ref: {:?}", dog_trait_ref);
-    let cat_vtable_entries = tcx.vtable_entries(cat_trait_ref);
-    let dog_vtable_entries = tcx.vtable_entries(dog_trait_ref);
-    debug!("cat vtable_entries: {:?}", cat_vtable_entries);
-    debug!("dog vtable_entries: {:?}", dog_vtable_entries);
-    match cat_vtable_entries[3] {
-        VtblEntry::Method(inst) => {
-            debug!("inst.def: {:?}", inst.def);
-            debug!("inst.args: {:?}", inst.args);
-        }
-        _ => debug!("another"),
-    }
+    //let cat_trait_ref = tcx.impl_trait_ref(impls_vals.get(0).unwrap().as_slice()[0]).unwrap().skip_binder();
+    //let dog_trait_ref = tcx.impl_trait_ref(impls_vals.get(1).unwrap().as_slice()[0]).unwrap().skip_binder();
+    //debug!("cat trait_ref: {:?}", cat_trait_ref);
+    //debug!("dog trait_ref: {:?}", dog_trait_ref);
+    //let cat_vtable_entries = tcx.vtable_entries(cat_trait_ref);
+    //let dog_vtable_entries = tcx.vtable_entries(dog_trait_ref);
+    //debug!("cat vtable_entries: {:?}", cat_vtable_entries);
+    //debug!("dog vtable_entries: {:?}", dog_vtable_entries);
+    //match cat_vtable_entries[3] {
+    //    VtblEntry::Method(inst) => {
+    //        debug!("inst.def: {:?}", inst.def);
+    //        debug!("inst.args: {:?}", inst.args);
+    //    }
+    //    _ => debug!("another"),
+    //}
 
     // /////////////////////////
 
     // get old terminator's edges
-    let edges = data.terminator().kind.edges();
-    let bb_old_return;
-    let bb_old_cleanup;
-    match edges {
-        TerminatorEdges::AssignOnReturn { return_, cleanup, .. } => {
-            debug!("edges problems?");
-            if return_.len() > 1 {
-                debug!("RET: multiple return blocks");
-            }
-            if cleanup.is_none() {
-                debug!("CLN: no cleanup");
-            }
-            bb_old_return = return_[0];
-            bb_old_cleanup = cleanup.unwrap();
-        }
-        _ => {
-            debug!("another TerminatorEdges");
-            panic!("verifopt: need to set terminator edges");
-        }
-    }
+    let (bb_old_next, bb_old_cleanup) = get_bbs(data);
+    // if no return value, let bb_old_return = bb_old_next;
+    let bb_old_return = bb_old_next + 1;
+
 
     // /////////////////////////
     // add / modify blocks (+ add necessary locals)
@@ -237,7 +397,7 @@ fn replace_dynamic_dispatch<'tcx>(
     // - _7: temp (first ptr::metadata block - the modified one)
     // - _8: copy _2 Transmute
 
-    let mut set = HashSet::new();
+    //let mut set = HashSet::new();
 
     debug!("num_bbs: {:?}", num_bbs);
 
@@ -266,7 +426,7 @@ fn replace_dynamic_dispatch<'tcx>(
         dynmetadata_animal_loc,
         const_dyn_traitobj_loc2,
         const_dyn_traitobj_loc1,
-        &mut set,
+        //&mut set,
     );
 
 
@@ -321,7 +481,7 @@ fn replace_dynamic_dispatch<'tcx>(
         dynmetadata_cat_loc,
         traitobj_did,
         const_dyn_traitobj_loc2,
-        &mut set,
+        //&mut set,
     );
     assert_eq!(bb_cat_ptr_metadata_exp, bb_cat_ptr_metadata_act);
 
@@ -355,6 +515,11 @@ fn replace_dynamic_dispatch<'tcx>(
     let boxed_dyn_traitobj_loc1 = add_boxed_dyn_traitobj_temp(tcx, patch, traitobj_did);
     //assert_eq!(boxed_dyn_traitobj_loc1.as_u32(), 16);
     let bb_first_compare_exp = BasicBlock::from_usize(bb_into_raw_exp.as_usize() + 1);
+    let to_free = vec![
+        dyn_traitobj_cat_loc,
+        const_dyn_traitobj_cat_loc2,
+        const_dyn_traitobj_cat_loc3,
+    ];
     let bb_into_raw_act = add_into_raw_block(
         tcx,
         patch,
@@ -364,10 +529,8 @@ fn replace_dynamic_dispatch<'tcx>(
         boxed_dyn_traitobj_loc1,
         animal,
         traitobj_did,
-        dyn_traitobj_cat_loc,
-        const_dyn_traitobj_cat_loc2,
-        const_dyn_traitobj_cat_loc3,
-        &mut set,
+        Some(to_free),
+        //&mut set,
     );
     assert_eq!(bb_into_raw_exp, bb_into_raw_act);
 
@@ -394,8 +557,8 @@ fn replace_dynamic_dispatch<'tcx>(
         first_eq_res_loc,
         traitobj_did,
         false,
-        boxed_dyn_traitobj_loc1,
-        &mut set,
+        Some(vec![boxed_dyn_traitobj_loc1]),
+        //&mut set,
     );
     assert_eq!(bb_first_compare_exp, bb_first_compare_act);
 
@@ -429,7 +592,7 @@ fn replace_dynamic_dispatch<'tcx>(
         cat_did,
         cat_speak_did,
         Some(to_free),
-        &mut set,
+        //&mut set,
     );
     assert_eq!(bb_cat_speak_exp, bb_cat_speak_act);
 
@@ -493,7 +656,7 @@ fn replace_dynamic_dispatch<'tcx>(
         dog_did,
         dog_speak_did,
         None,
-        &mut set,
+        //&mut set,
     );
     assert_eq!(bb_dog_speak_exp, bb_dog_speak_act);
 
@@ -686,6 +849,20 @@ fn add_mut_bool_temp<'tcx>(tcx: TyCtxt<'tcx>, patch: &mut MirPatch<'tcx>) -> Loc
     patch.new_temp(tcx.mk_ty_from_kind(crate::ty::Bool), dummy_span())
 }
 
+fn add_goto_block<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    bb_ret: BasicBlock,
+) -> BasicBlock {
+    let term = Terminator {
+        source_info: dummy_source_info(),
+        kind: TerminatorKind::Goto { target: bb_ret },
+    };
+
+    let bb_data = BasicBlockData::new(Some(term), false);
+    patch.new_block(bb_data)
+}
+
 fn add_ret_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
@@ -750,7 +927,7 @@ fn add_speak_block<'tcx>(
     concrete_ty_did: DefId,
     speak_fn_did: DefId,
     to_free_opt: Option<Vec<Local>>,
-    set: &mut HashSet<Local>,
+    //set: &mut HashSet<Local>,
 ) -> BasicBlock {
     // /////////////////////////
     // add block (cat speak):
@@ -779,8 +956,8 @@ fn add_speak_block<'tcx>(
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(func_ret_loc)));
 
     // copy raw_animal ptr
-    debug!("SET INSERT RES: {} - 0", set.insert(raw_traitobj2_loc));
-    debug!("loc: {:?}", raw_traitobj2_loc);
+    //debug!("SET INSERT RES: {} - 0", set.insert(raw_traitobj2_loc));
+    //debug!("loc: {:?}", raw_traitobj2_loc);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -794,8 +971,8 @@ fn add_speak_block<'tcx>(
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
 
-    debug!("SET INSERT RES: {} - 1", set.insert(concrete_ty_loc));
-    debug!("loc: {:?}", concrete_ty_loc);
+    //debug!("SET INSERT RES: {} - 1", set.insert(concrete_ty_loc));
+    //debug!("loc: {:?}", concrete_ty_loc);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -830,8 +1007,8 @@ fn add_speak_block<'tcx>(
     let gen_args: &[GenericArg<'tcx>] = &[];
     let gen_args_ref = tcx.mk_args(gen_args);
 
-    debug!("SET INSERT RES: {} - 2", set.insert(func_ret_loc));
-    debug!("loc: {:?}", func_ret_loc);
+    //debug!("SET INSERT RES: {} - 2", set.insert(func_ret_loc));
+    //debug!("loc: {:?}", func_ret_loc);
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::Call {
@@ -894,8 +1071,8 @@ fn add_compare_vtable_block<'tcx>(
     eq_res_loc: Local,
     traitobj_did: DefId,
     done_copy: bool,
-    free1: Local,
-    set: &mut HashSet<Local>,
+    to_free_opt: Option<Vec<Local>>,
+    //set: &mut HashSet<Local>,
 ) -> BasicBlock {
     // /////////////////////////
     // add block (first compare):
@@ -909,12 +1086,17 @@ fn add_compare_vtable_block<'tcx>(
 
     let mut stmts: Vec<Statement<'tcx>> = Vec::new();
 
-    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free1)));
+    if let Some(to_free_vec) = to_free_opt {
+        for to_free in to_free_vec.iter() {
+            stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(*to_free)));
+        }
+    }
+
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(raw_traitobj1_loc)));
 
     if !done_copy {
-        debug!("SET INSERT RES: {} - 3", set.insert(raw_traitobj1_loc));
-        debug!("loc: {:?}", raw_traitobj1_loc);
+        //debug!("SET INSERT RES: {} - 3", set.insert(raw_traitobj1_loc));
+        //debug!("loc: {:?}", raw_traitobj1_loc);
         stmts.push(Statement::new(
             dummy_source_info(),
             StatementKind::Assign(Box::new((
@@ -944,11 +1126,11 @@ fn add_compare_vtable_block<'tcx>(
     ));
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(eq_res_loc)));
 
-    debug!("WTF");
-    debug!("DM TO REF LOCAL: {:?}", dynmetadata_traitobj_ref_loc);
-    debug!("DM TO LOCAL: {:?}", dynmetadata_traitobj_loc);
-    debug!("SET INSERT RES: {} - 4", set.insert(dynmetadata_traitobj_ref_loc));
-    debug!("loc: {:?}", dynmetadata_traitobj_ref_loc);
+    //debug!("WTF");
+    //debug!("DM TO REF LOCAL: {:?}", dynmetadata_traitobj_ref_loc);
+    //debug!("DM TO LOCAL: {:?}", dynmetadata_traitobj_loc);
+    //debug!("SET INSERT RES: {} - 4", set.insert(dynmetadata_traitobj_ref_loc));
+    //debug!("loc: {:?}", dynmetadata_traitobj_ref_loc);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -961,10 +1143,10 @@ fn add_compare_vtable_block<'tcx>(
         ))),
     ));
 
-    debug!("DM CT REF LOCAL: {:?}", dynmetadata_concretety_ref_loc);
-    debug!("DM CT LOCAL: {:?}", dynmetadata_concretety_loc);
-    debug!("SET INSERT RES: {} - 5", set.insert(dynmetadata_concretety_ref_loc));
-    debug!("loc: {:?}", dynmetadata_concretety_ref_loc);
+    //debug!("DM CT REF LOCAL: {:?}", dynmetadata_concretety_ref_loc);
+    //debug!("DM CT LOCAL: {:?}", dynmetadata_concretety_loc);
+    //debug!("SET INSERT RES: {} - 5", set.insert(dynmetadata_concretety_ref_loc));
+    //debug!("loc: {:?}", dynmetadata_concretety_ref_loc);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -998,8 +1180,8 @@ fn add_compare_vtable_block<'tcx>(
         },
     ]);
 
-    debug!("SET INSERT RES: {} - 6", set.insert(eq_res_loc));
-    debug!("loc: {:?}", eq_res_loc);
+    //debug!("SET INSERT RES: {} - 6", set.insert(eq_res_loc));
+    //debug!("loc: {:?}", eq_res_loc);
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::Call {
@@ -1037,12 +1219,8 @@ fn add_into_raw_block<'tcx>(
     boxed_dyn_traitobj_loc: Local,
     boxed_dyn_traitobj_animal_loc: Local,
     traitobj_did: DefId,
-    free1: Local,
-    free2: Local,
-    free3: Local,
-    //free4: Local,
-    //free5: Local,
-    set: &mut HashSet<Local>,
+    to_free_opt: Option<Vec<Local>>,
+    //set: &mut HashSet<Local>,
 ) -> BasicBlock {
     // /////////////////////////
     // add block (animal into_raw):
@@ -1055,11 +1233,11 @@ fn add_into_raw_block<'tcx>(
 
     let mut stmts: Vec<Statement<'tcx>> = Vec::new();
 
-    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free1)));
-    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free2)));
-    stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free3)));
-    //stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free4)));
-    //stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(free5)));
+    if let Some(to_free_vec) = to_free_opt {
+        for to_free in to_free_vec.iter() {
+            stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageDead(*to_free)));
+        }
+    }
 
     stmts.push(Statement::new(
         dummy_source_info(),
@@ -1076,8 +1254,8 @@ fn add_into_raw_block<'tcx>(
 
     // TODO const false ?
 
-    debug!("SET INSERT RES: {} - 7", set.insert(boxed_dyn_traitobj_loc));
-    debug!("loc: {:?}", boxed_dyn_traitobj_loc);
+    //debug!("SET INSERT RES: {} - 7", set.insert(boxed_dyn_traitobj_loc));
+    //debug!("loc: {:?}", boxed_dyn_traitobj_loc);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -1099,8 +1277,8 @@ fn add_into_raw_block<'tcx>(
         span: dummy_span(),
     }]);
 
-    debug!("SET INSERT RES: {} - 8", set.insert(mut_dyn_traitobj_loc));
-    debug!("loc: {:?}", mut_dyn_traitobj_loc);
+    //debug!("SET INSERT RES: {} - 8", set.insert(mut_dyn_traitobj_loc));
+    //debug!("loc: {:?}", mut_dyn_traitobj_loc);
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::Call {
@@ -1141,7 +1319,7 @@ fn add_ptr_metadata_block<'tcx>(
     dynmetadata_loc: Local,
     traitobj_did: DefId,
     free1: Local,
-    set: &mut HashSet<Local>,
+    //set: &mut HashSet<Local>,
 ) -> BasicBlock {
     // /////////////////////////
     // add ptr_metadata block:
@@ -1190,8 +1368,8 @@ fn add_ptr_metadata_block<'tcx>(
     ));
     stmts.push(Statement::new(dummy_source_info(), StatementKind::StorageLive(dynmetadata_loc)));
 
-    debug!("SET INSERT RES: {} - 9", set.insert(const_dyn_traitobj_loc1));
-    debug!("loc: {:?}", const_dyn_traitobj_loc1);
+    //debug!("SET INSERT RES: {} - 9", set.insert(const_dyn_traitobj_loc1));
+    //debug!("loc: {:?}", const_dyn_traitobj_loc1);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -1204,8 +1382,8 @@ fn add_ptr_metadata_block<'tcx>(
         ))),
     ));
 
-    debug!("SET INSERT RES: {} - 10", set.insert(dyn_traitobj_loc));
-    debug!("loc: {:?}", dyn_traitobj_loc);
+    //debug!("SET INSERT RES: {} - 10", set.insert(dyn_traitobj_loc));
+    //debug!("loc: {:?}", dyn_traitobj_loc);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -1218,8 +1396,8 @@ fn add_ptr_metadata_block<'tcx>(
         ))),
     ));
 
-    debug!("SET INSERT RES: {} - 11", set.insert(const_dyn_traitobj_loc2));
-    debug!("loc: {:?}", const_dyn_traitobj_loc2);
+   // debug!("SET INSERT RES: {} - 11", set.insert(const_dyn_traitobj_loc2));
+   // debug!("loc: {:?}", const_dyn_traitobj_loc2);
     stmts.push(Statement::new(
         dummy_source_info(),
         StatementKind::Assign(Box::new((
@@ -1236,8 +1414,8 @@ fn add_ptr_metadata_block<'tcx>(
         span: dummy_span(),
     }]);
 
-    debug!("SET INSERT RES: {} - 12", set.insert(dynmetadata_loc));
-    debug!("loc: {:?}", dynmetadata_loc);
+    //debug!("SET INSERT RES: {} - 12", set.insert(dynmetadata_loc));
+    //debug!("loc: {:?}", dynmetadata_loc);
     let term = Terminator {
         source_info: dummy_source_info(),
         kind: TerminatorKind::Call {
@@ -1280,11 +1458,11 @@ fn modify_dyndispatch_block<'tcx>(
     //free1: Local,
     //free2: Local,
     //free3: Local,
-    set: &mut HashSet<Local>,
+    //set: &mut HashSet<Local>,
 ) {
     let (num_statements, first_non_storage_idx, locals_to_liven) = get_relevant_indices(data);
 
-    add_raw_const_stmt(tcx, patch, bb, num_statements, const_dyn_traitobj_loc, dyn_traitobj_loc, set);
+    add_raw_const_stmt(tcx, patch, bb, num_statements, const_dyn_traitobj_loc, dyn_traitobj_loc); //, set);
 
     replace_term_ptrmetadata_call(
         tcx,
@@ -1295,7 +1473,7 @@ fn modify_dyndispatch_block<'tcx>(
         bb_cleanup,
         dynmetadata_loc,
         const_dyn_traitobj_loc,
-        set,
+        //set,
     );
 
     //patch.add_statement(
@@ -1333,9 +1511,9 @@ fn get_relevant_indices<'tcx>(data: &BasicBlockData<'tcx>) -> (usize, usize, Vec
     // iterate through block statements to get:
     // - [x] place indices (locals)
     // - [x] statement indices
-    debug!("MOD FIRST BLOCK");
+    //debug!("MOD FIRST BLOCK");
     let num_statements = data.statements.len();
-    debug!("num_statements: {:?}", num_statements);
+    //debug!("num_statements: {:?}", num_statements);
     let mut first_non_storage_idx = 0;
 
     // get statement indices
@@ -1354,13 +1532,13 @@ fn get_relevant_indices<'tcx>(data: &BasicBlockData<'tcx>) -> (usize, usize, Vec
         }
     }
     // get place indices
-    debug!("TO LIVEN");
+    //debug!("TO LIVEN");
     let mut locals_to_liven = vec![];
     for stmt in data.statements.iter() {
         match &stmt.kind {
             StatementKind::Assign(boxed) => {
                 let (lplace, _rval) = *(boxed.clone());
-                debug!("lplace: {:?}", lplace.local.as_u32());
+                //debug!("lplace: {:?}", lplace.local.as_u32());
                 locals_to_liven.push(lplace.local);
             }
             _ => {}
@@ -1369,7 +1547,7 @@ fn get_relevant_indices<'tcx>(data: &BasicBlockData<'tcx>) -> (usize, usize, Vec
 
     // only enliven non-live locals
     locals_to_liven.retain(|loc| !locals_alive.contains(&loc));
-    debug!("locals_to_liven: {:?}", locals_to_liven);
+    //debug!("locals_to_liven: {:?}", locals_to_liven);
 
     (num_statements, first_non_storage_idx, locals_to_liven)
 }
@@ -1381,7 +1559,7 @@ fn add_raw_const_stmt<'tcx>(
     idx: usize,
     const_dyn_traitobj_loc: Local,
     dyn_traitobj_loc: Local,
-    set: &mut HashSet<Local>,
+    //set: &mut HashSet<Local>,
 ) {
     let loc = Location { block: bb, statement_index: idx };
 
@@ -1391,8 +1569,8 @@ fn add_raw_const_stmt<'tcx>(
     let deref_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[ProjectionElem::Deref];
     let deref_proj = tcx.mk_place_elems(deref_proj_slice);
 
-    debug!("SET INSERT RES: {} - 13", set.insert(const_dyn_traitobj_loc));
-    debug!("loc: {:?}", const_dyn_traitobj_loc);
+    //debug!("SET INSERT RES: {} - 13", set.insert(const_dyn_traitobj_loc));
+    //debug!("loc: {:?}", const_dyn_traitobj_loc);
     patch.add_assign(
         loc,
         Place { local: const_dyn_traitobj_loc, projection: empty_proj },
@@ -1400,6 +1578,19 @@ fn add_raw_const_stmt<'tcx>(
             RawPtrKind::Const,
             Place { local: dyn_traitobj_loc, projection: deref_proj },
         ),
+    );
+}
+
+fn replace_dyndispatch_term_w_goto<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    patch: &mut MirPatch<'tcx>,
+    cur_bb: BasicBlock,
+    new_start: BasicBlock,
+) {
+    // replace term w goto
+    patch.patch_terminator(
+        cur_bb,
+        TerminatorKind::Goto { target: new_start },
     );
 }
 
@@ -1412,7 +1603,7 @@ fn replace_term_ptrmetadata_call<'tcx>(
     bb_cleanup: BasicBlock,
     dynmetadata_loc: Local,
     const_dyn_traitobj_loc: Local,
-    set: &mut HashSet<Local>,
+    //set: &mut HashSet<Local>,
 ) {
     // make empty projection
     let empty_proj_slice: &[ProjectionElem<Local, Ty<'_>>] = &[];
@@ -1427,8 +1618,8 @@ fn replace_term_ptrmetadata_call<'tcx>(
         span: dummy_span(),
     }]);
 
-    debug!("SET INSERT RES: {} - 14", set.insert(dynmetadata_loc));
-    debug!("loc: {:?}", dynmetadata_loc);
+    //debug!("SET INSERT RES: {} - 14", set.insert(dynmetadata_loc));
+    //debug!("loc: {:?}", dynmetadata_loc);
     patch.patch_terminator(
         bb,
         TerminatorKind::Call {
