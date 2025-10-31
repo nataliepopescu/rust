@@ -13,6 +13,7 @@
 
 use rustc_abi::FieldIdx;
 //use rustc_middle::mir::{Statement, Terminator, StatementKind, TerminatorKind, Operand, CastKind, Rvalue, BinOp, PlaceElem, PlaceRef, Place, UnwindAction, CallSource, ConstOperand, ConstValue, Local, ProjectionElem, BasicBlock, BasicBlockData, RawPtrKind, Location, SwitchTargets, SourceInfo, SourceScope, Body, TerminatorEdges};
+use rustc_index::IndexSlice;
 use rustc_middle::mir::*;
 use rustc_middle::ty::fast_reject::SimplifiedType;
 use rustc_middle::ty::*;
@@ -39,6 +40,7 @@ const TO_STRING_FN_DEFID: DefId = DefId { index: DefIndex::from_u32(6619), krate
 impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let mut patch = MirPatch::new(body);
+        let old_locals = body.local_decls();
 
         //debug!("for func @ {:?}", body.span);
         //debug!("LOCALS BEFORE ({:?})", body.local_decls().len());
@@ -62,7 +64,7 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
             //}
             //id_term(tcx, &data.terminator().kind);
             match &data.terminator().kind {
-                TerminatorKind::Call { func, .. } => {
+                TerminatorKind::Call { func, args, destination, .. } => {
                     if let Some((defid, rawlist)) = func.const_fn_def() {
                         if tcx.def_path_debug_str(defid).contains("Animal::kaeps") {
                             let ty = rawlist.type_at(0);
@@ -70,7 +72,7 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
                             if ty.is_trait() {
                                 //debug!("ty: {:?}", ty);
                                 let num_bbs = body.basic_blocks.len();
-                                replace_dynamic_dispatch_bmarks(tcx, &mut patch, ty, bb, data, num_bbs);
+                                replace_dynamic_dispatch_bmarks(tcx, &mut patch, old_locals, ty, *destination, bb, data, num_bbs);
                             }
                         }
                     }
@@ -167,19 +169,37 @@ fn get_traitobj_did<'tcx>(
     traitobj_did.unwrap()
 }
 
+fn dyndispatch_retval<'tcx>(
+    old_locals: &IndexSlice<Local, LocalDecl<'tcx>>,
+    term_dst_place: Place<'tcx>,
+) -> bool {
+    if old_locals.get(term_dst_place.local).is_some() {
+        true
+    } else {
+        false
+    }
+}
+
 fn replace_dynamic_dispatch_bmarks<'tcx>(
     tcx: TyCtxt<'tcx>,
     patch: &mut MirPatch<'tcx>,
+    old_locals: &IndexSlice<Local, LocalDecl<'tcx>>,
     ty: Ty<'tcx>,
+    term_dst_place: Place<'tcx>,
     bb: BasicBlock,
     data: &BasicBlockData<'tcx>,
     num_bbs: usize,
 ) {
     // get old terminator's edges
     let (bb_old_next, bb_old_cleanup) = get_bbs(data);
-    // TODO how to check if returning something or not?
-    // if no return value, let bb_old_return = bb_old_next;
-    let bb_old_return = bb_old_next + 1;
+    let has_retval = dyndispatch_retval(old_locals, term_dst_place);
+    let bb_old_return;
+    if has_retval {
+        bb_old_return = bb_old_next + 1;
+    } else {
+        bb_old_return = bb_old_next;
+    }
+
     let bb_into_raw_exp = BasicBlock::from_usize(num_bbs);
 
     let traitobj_did = get_traitobj_did(ty);
