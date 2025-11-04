@@ -12,6 +12,7 @@
 //use rustc_middle::mir::{Statement, Terminator, StatementKind, TerminatorKind, Operand, CastKind, Rvalue, BinOp, PlaceElem, PlaceRef, Place, UnwindAction, CallSource, ConstOperand, ConstValue, Local, ProjectionElem, BasicBlock, BasicBlockData, RawPtrKind, Location, SwitchTargets, SourceInfo, SourceScope, Body, TerminatorEdges};
 use rustc_index::IndexSlice;
 use rustc_middle::mir::*;
+use rustc_middle::mir::visit::Visitor;
 use rustc_middle::ty::fast_reject::SimplifiedType;
 use rustc_middle::ty::*;
 use rustc_span::def_id::*;
@@ -21,6 +22,8 @@ use rustc_span::*;
 //use tracing::debug;
 
 use crate::patch::MirPatch;
+
+use crate::verifopt_analysis::FlowInterp;
 
 pub(super) struct ReplaceDynamicDispatch;
 
@@ -34,7 +37,10 @@ impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
 
         /* ANALYSIS */
 
-
+        let mut flow_interp = FlowInterp::new();
+        for (bb, data) in traversal::postorder(body) {
+            flow_interp.visit_basic_block_data(bb, data);
+        }
 
         /* TRANSFORMATION */
 
