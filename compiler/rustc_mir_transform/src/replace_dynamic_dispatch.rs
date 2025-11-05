@@ -35,27 +35,15 @@ const EQ_FN_DEFID: DefId = DefId { index: DefIndex::from_u32(3216), krate: Crate
 impl<'tcx> crate::MirPass<'tcx> for ReplaceDynamicDispatch {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
-        /* ANALYSIS */
+        /* FLOW ANALYSIS */
 
         let mut flow_interp = FlowInterp::new();
-        for (bb, data) in traversal::postorder(body) {
-            flow_interp.visit_basic_block_data(bb, data);
-        }
+        flow_interp.visit_body(body);
 
         /* TRANSFORMATION */
 
         let mut patch = MirPatch::new(body);
         let old_locals = body.local_decls();
-
-        //debug!("for func @ {:?}", body.span);
-        //debug!("LOCALS BEFORE ({:?})", body.local_decls().len());
-        //for (idx, local_decl) in body.local_decls().iter_enumerated() {
-        //    debug!("-------idx: {:?}", idx);
-        //    debug!("local_decl: {:?}", local_decl);
-        //    debug!("mutability: {:?}", local_decl.mutability);
-        //    debug!("ty: {:?}", local_decl.ty);
-        //    id_ty(local_decl.ty);
-        //}
 
         //debug!("--START GET DEFIDS--");
         //debug!("{:?}", tcx.all_diagnostic_items(()));

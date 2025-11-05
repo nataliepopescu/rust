@@ -54,7 +54,9 @@ mod lint_tail_expr_drop_order;
 mod patch;
 mod shim;
 mod ssa;
+
 mod verifopt_analysis;
+mod verifopt_constraints;
 
 /// We import passes via this macro so that we can have a static list of pass names
 /// (used to verify CLI arguments). It takes a list of modules, followed by the passes
