@@ -109,14 +109,32 @@ pub(crate) fn get_vtable<'tcx, Cx: CodegenMethods<'tcx>>(
 
     // Check the cache.
     if let Some(&val) = cx.vtables().borrow().get(&(ty, trait_ref)) {
+        debug!("CACHED");
+        debug!("ty = {:?}", ty);
+        debug!("trait = {:?}", trait_ref);
         return val;
     }
 
+    debug!("NOT CACHED");
+    debug!("ty = {:?}", ty);
+    debug!("trait = {:?}", trait_ref);
+
+    // could skip allocation here
+    // (apparently this query calls vtable_allocation_provider)
     let vtable_alloc_id = tcx.vtable_allocation((ty, trait_ref));
+    // but this essentially checks that the thing was actually allocated
+    // _could_ return a GlobalAlloc::TypeId, but does this add more dynamic dispatch?
     let vtable_allocation = tcx.global_alloc(vtable_alloc_id).unwrap_memory();
+    // creates an LLVM constant: we want to skip this if our allocation is empty! TODO
+    // a Value
     let vtable_const = cx.const_data_from_alloc(vtable_allocation);
+    debug!("---VTABLE CONST: {:?}", vtable_const);
     let align = cx.data_layout().pointer_align().abi;
+    // this gets a ptr to the LLVM global variable containing the above const we
+    // created... which we don't want to generate
+    // also a Value
     let vtable = cx.static_addr_of(vtable_const, align, Some("vtable"));
+    debug!("---VTABLE: {:?}", vtable);
 
     cx.apply_vcall_visibility_metadata(ty, trait_ref, vtable);
     cx.create_vtable_debuginfo(ty, trait_ref, vtable);
