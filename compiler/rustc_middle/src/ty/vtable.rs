@@ -81,7 +81,7 @@ pub(crate) fn vtable_min_entries<'tcx>(
 }
 
 fn get_ty_id<'tcx>(_tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> u128 {
-    let file = File::open("/home/np/hack/verifopt/analysis/defids").unwrap();
+    let file = File::open("/home/np/hack/verifopt/analysis/defids_from_map").unwrap();
     let reader = BufReader::new(file);
 
     debug!("IN GET_TY_ID");

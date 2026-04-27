@@ -162,6 +162,7 @@ mod rvalue_scopes;
 mod structural_impls;
 #[allow(hidden_glob_reexports)]
 mod sty;
+mod tag;
 mod typeck_results;
 mod visit;
 
@@ -2172,6 +2173,7 @@ pub fn provide(providers: &mut Providers) {
         trait_impls_in_crate: trait_def::trait_impls_in_crate_provider,
         traits: trait_def::traits_provider,
         vtable_allocation: vtable::vtable_allocation_provider,
+        ty_tag: tag::ty_tag_provider,
         ..*providers
     };
 }

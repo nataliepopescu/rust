@@ -122,9 +122,11 @@ pub(crate) fn get_vtable<'tcx, Cx: CodegenMethods<'tcx>>(
     // could skip allocation here
     // (apparently this query calls vtable_allocation_provider)
     let vtable_alloc_id = tcx.vtable_allocation((ty, trait_ref));
+    debug!("\tALLOCID: {:?}", vtable_alloc_id);
     // but this essentially checks that the thing was actually allocated
     // _could_ return a GlobalAlloc::TypeId, but does this add more dynamic dispatch?
     let vtable_allocation = tcx.global_alloc(vtable_alloc_id).unwrap_memory();
+    debug!("\tALLOC: {:?}", vtable_allocation);
     // creates an LLVM constant: we want to skip this if our allocation is empty! TODO
     // a Value
     let vtable_const = cx.const_data_from_alloc(vtable_allocation);
@@ -159,7 +161,9 @@ pub(crate) fn load_vtable<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         if let Some(trait_ref) = dyn_trait_in_self(bx.tcx(), ty) {
             let typeid =
                 bx.typeid_metadata(typeid_for_trait_ref(bx.tcx(), trait_ref).as_bytes()).unwrap();
+            debug!("\tTYPEID: {:?}", typeid);
             let func = bx.type_checked_load(llvtable, vtable_byte_offset, typeid);
+            debug!("\tFUNC: {:?}", func);
             return func;
         } else if nonnull {
             bug!("load nonnull value from a vtable without a principal trait")
@@ -167,7 +171,9 @@ pub(crate) fn load_vtable<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     }
 
     let gep = bx.inbounds_ptradd(llvtable, bx.const_usize(vtable_byte_offset));
+    debug!("\tGEP: {:?}", gep);
     let ptr = bx.load(llty, gep, ptr_align);
+    debug!("\tPTR: {:?}", ptr);
     // VTable loads are invariant.
     bx.set_invariant_load(ptr);
     if nonnull {

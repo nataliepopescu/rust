@@ -628,6 +628,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 //                \-------/
                 //
                 let virtual_drop = Instance {
+                    // FIXME get drop_fn elsewhere; InstanceKind should no longer be Virtual
                     def: ty::InstanceKind::Virtual(drop_fn.def_id(), 0), // idx 0: the drop function
                     args: drop_fn.args,
                 };
@@ -640,6 +641,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 args = &args[..1];
                 (
                     true,
+                    // FIXME
                     meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
                         .get_optional_fn(bx, vtable, ty, fn_abi),
                     fn_abi,
@@ -1111,6 +1113,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         // Now that we have `*dyn Trait` or `&dyn Trait`, split it up into its
                         // data pointer and vtable. Look up the method in the vtable, and pass
                         // the data pointer as the first argument.
+                        // FIXME
                         llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
                             bx,
                             meta,

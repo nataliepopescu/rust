@@ -2728,6 +2728,10 @@ rustc_queries! {
         desc { |tcx| "checking what set of sanitizers are enabled on `{}`", tcx.def_path_str(key) }
         feedable
     }
+
+    query ty_tag(ty: Ty<'tcx>) -> usize {
+        desc { "computing tag for type `{}`", ty }
+    }
 }
 
 rustc_with_all_queries! { define_callbacks! }
