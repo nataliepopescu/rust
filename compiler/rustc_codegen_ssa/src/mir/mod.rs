@@ -25,6 +25,7 @@ pub mod operand;
 pub mod place;
 mod rvalue;
 mod statement;
+mod verifopt_rewrite;
 
 pub use self::block::store_cast;
 use self::debuginfo::{FunctionDebugContext, PerLocalVarDebugInfo};
@@ -187,14 +188,19 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let fn_abi = cx.fn_abi_of_instance(instance, ty::List::empty());
     debug!("fn_abi: {:?}", fn_abi);
 
+    // If VerifOpt rewrite is gated, also gate this
+    let mut monomorphized_mir = instance.instantiate_mir_and_normalize_erasing_regions(
+        tcx,
+        ty::TypingEnv::fully_monomorphized(),
+        ty::EarlyBinder::bind(tcx, mir.clone()),
+    );
     if tcx.features().ergonomic_clones() {
-        let monomorphized_mir = instance.instantiate_mir_and_normalize_erasing_regions(
-            tcx,
-            ty::TypingEnv::fully_monomorphized(),
-            ty::EarlyBinder::bind(mir.clone()),
-        );
-        mir = tcx.arena.alloc(optimize_use_clone::<Bx>(cx, monomorphized_mir));
+        monomorphized_mir = optimize_use_clone::<Bx>(cx, monomorphized_mir);
     }
+    // VerifOpt Rewrite
+    mir = tcx.arena.alloc(
+        crate::mir::verifopt_rewrite::rewrite_monomorphized(tcx, instance, monomorphized_mir)
+    );
 
     let debug_context = cx.create_function_debug_context(instance, fn_abi, llfn, &mir);
 
