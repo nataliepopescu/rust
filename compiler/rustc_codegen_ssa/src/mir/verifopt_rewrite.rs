@@ -808,6 +808,13 @@ pub(super) fn rewrite_monomorphized<'tcx>(
     instance: Instance<'tcx>,
     monomorphized_mir: Body<'tcx>,
 ) -> Body<'tcx> {
+    // Set by cargo-verifopt's own run_cargo_build, on the top-level
+    // cargo command it spawns - inherited from there by every
+    // downstream process it transitively spawns
+    if std::env::var("VERIFOPT_SKIP_REWRITE").is_ok() {
+        return monomorphized_mir;
+    }
+
     let hash = tcx.def_path_hash(instance.def_id());
     let edits = match SHARED_STORE.get_or_init(load_shared_store) {
         Some(shared) => compute_edits(shared, hash, &monomorphized_mir),
