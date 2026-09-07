@@ -192,7 +192,7 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let mut monomorphized_mir = instance.instantiate_mir_and_normalize_erasing_regions(
         tcx,
         ty::TypingEnv::fully_monomorphized(),
-        ty::EarlyBinder::bind(tcx, mir.clone()),
+        ty::EarlyBinder::bind(mir.clone()),
     );
     if tcx.features().ergonomic_clones() {
         monomorphized_mir = optimize_use_clone::<Bx>(cx, monomorphized_mir);

@@ -1,11 +1,6 @@
-//extern crate rustc_data_structures;
-//extern crate rustc_driver;
-//extern crate rustc_hir;
-//extern crate rustc_interface;
-//extern crate rustc_middle;
-//extern crate rustc_public;
-//extern crate rustc_session;
-//extern crate rustc_span;
+
+use rustc_data_structures::fx::{FxHashSet as HashSet};
+use rustc_data_structures::fx::{FxHashMap as HashMap};
 
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::smallvec::SmallVec;
@@ -15,21 +10,22 @@ use rustc_middle::mir::{
     LocalDecl, Mutability, Operand, Place, ProjectionElem, Rvalue, SourceInfo, Statement,
     StatementKind, SwitchTargets, Terminator, TerminatorKind, UnOp,
 };
-use rustc_span::def_id::{DefPathHash, LOCAL_CRATE, LocalDefId};
-use rustc_attr_ir::LangItem;
+use rustc_span::def_id::{DefPathHash, LOCAL_CRATE};
+use rustc_hir::LangItem;
 use rustc_hir::Safety;
 use rustc_hir::def::DefKind;
 use rustc_middle::mir::pretty::MirWriter;
+use rustc_middle::ty;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::{
-    AssocKind, FnDef, GenericArg, Instance, List, Ty, TyCtxt, TyKind, TypingEnv, VtblEntry,
+    AssocKind, FnDef, GenericArg, Instance, List, Ty, TyCtxt, TypingEnv, VtblEntry,
 };
 use rustc_span::Span;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 
-use std::collections::{HashMap, HashSet};
+//use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 
 #[derive(Default)]
-pub struct Store {
+pub(super) struct Store {
     pub targets: HashMap<(DefPathHash, usize), Vec<(DefPathHash, Option<Vec<DefPathHash>>)>>,
     pub tags: HashMap<
         (DefPathHash, usize),
@@ -51,7 +47,6 @@ pub struct Store {
     >,
 }
 
-static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct SerializableDefPathHash([u8; 16]);
@@ -87,6 +82,10 @@ struct SerializableStore {
 }
 
 impl From<&Store> for SerializableStore {
+    // Serialization order doesn't affect correctness - the store gets
+    // parsed back into an equivalent lookup structure on read, regardless
+    // of what order entries appear in the JSON file.
+    #[allow(rustc::potential_query_instability)]
     fn from(store: &Store) -> Self {
         let conv_opt_vec = |opt: &Option<Vec<DefPathHash>>| {
             opt.as_ref()
@@ -165,12 +164,8 @@ impl From<SerializableStore> for Store {
     }
 }
 
-pub fn dep_rewrite_store_path() -> &'static str {
+pub(super) fn dep_rewrite_store_path() -> &'static str {
     "verifopt_store.json"
-}
-
-pub fn needs_rewrite_pass_marker_path() -> &'static str {
-    "verifopt_needs_rewrite_pass"
 }
 
 static SHARED_STORE: OnceLock<Option<Store>> = OnceLock::new();
@@ -181,21 +176,6 @@ fn load_shared_store() -> Option<Store> {
     Some(Store::from(serializable))
 }
 
-
-fn store() -> &'static Mutex<Store> {
-    STORE.get_or_init(|| Mutex::new(Store::default()))
-}
-
-static ORIGINAL: OnceLock<for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>> =
-    OnceLock::new();
-
-static EXTERN_ORIGINAL: OnceLock<
-    for<'tcx> fn(TyCtxt<'tcx>, rustc_span::def_id::DefId) -> &'tcx Body<'tcx>,
-> = OnceLock::new();
-
-static SKIP_REWRITE: OnceLock<bool> = OnceLock::new();
-
-static SECOND_PASS_NEEDED: OnceLock<()> = OnceLock::new();
 
 static DYNAMIC_HITS: AtomicUsize = AtomicUsize::new(0);
 
@@ -351,7 +331,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
 
                 // <dyn X as X>
                 let trait_ref = match pointee_ty.kind() {
-                    TyKind::Dynamic(preds, _) => {
+                    ty::Dynamic(preds, _) => {
                         DYNAMIC_HITS.fetch_add(1, Ordering::Relaxed);
                         let principal = preds.principal().unwrap();
                         principal.with_self_ty(tcx, pointee_ty).skip_binder()
@@ -572,7 +552,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
 
                 let preds = default.basic_blocks.predecessors();
 
-                let found = find_casts(&bbs, preds, bb_idx, recv_local, &mut HashSet::new());
+                let found = find_casts(&bbs, preds, bb_idx, recv_local, &mut HashSet::default());
 
                 let planned: HashSet<(usize, usize)> = sites
                     .iter()
@@ -660,7 +640,8 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
 
     dump_body(tcx, &body, "after");
 
-    tcx.arena.alloc(body)
+    //tcx.arena.alloc(body)
+    body
 }
 
 fn fn_op<'tcx>(
@@ -773,6 +754,9 @@ fn narrow_dyn<'tcx>(
     (out, stmts)
 }
 
+// The only thing done with this result is a set-equality check, which only
+// depends on set membership - completely unaffected by iteration or insertion order.
+#[allow(rustc::potential_query_instability)]
 fn find_casts<'tcx>(
     bbs: &IndexVec<BasicBlock, BasicBlockData<'tcx>>,
     preds: &IndexVec<BasicBlock, SmallVec<[BasicBlock; 4]>>,
@@ -781,7 +765,7 @@ fn find_casts<'tcx>(
     seen: &mut HashSet<(usize, Local)>,
 ) -> Option<HashSet<(usize, usize)>> {
     if !seen.insert((bb_idx, local)) {
-        return Some(HashSet::new());
+        return Some(HashSet::default());
     }
 
     let bb = BasicBlock::from_usize(bb_idx);
@@ -811,7 +795,7 @@ fn find_casts<'tcx>(
         return None;
     }
 
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for p in ps {
         out.extend(find_casts(bbs, preds, p.index(), local, seen)?);
     }
@@ -819,7 +803,7 @@ fn find_casts<'tcx>(
     Some(out)
 }
 
-pub fn rewrite_monomorphized<'tcx>(
+pub(super) fn rewrite_monomorphized<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
     monomorphized_mir: Body<'tcx>,
@@ -831,4 +815,3 @@ pub fn rewrite_monomorphized<'tcx>(
     };
     apply_edits(tcx, monomorphized_mir, edits)
 }
-
