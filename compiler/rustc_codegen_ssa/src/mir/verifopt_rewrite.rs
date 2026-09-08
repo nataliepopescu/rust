@@ -171,9 +171,38 @@ pub(super) fn dep_rewrite_store_path() -> &'static str {
 static SHARED_STORE: OnceLock<Option<Store>> = OnceLock::new();
 
 fn load_shared_store() -> Option<Store> {
-    let contents = std::fs::read_to_string(dep_rewrite_store_path()).ok()?;
-    let serializable: SerializableStore = serde_json::from_str(&contents).ok()?;
-    Some(Store::from(serializable))
+    let contents = match std::fs::read_to_string(dep_rewrite_store_path()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[verifopt debug] could not read {}: {e}",
+                dep_rewrite_store_path()
+            );
+            return None;
+        }
+    };
+    eprintln!(
+        "[verifopt debug] read {} bytes from {}",
+        contents.len(),
+        dep_rewrite_store_path()
+    );
+    let serializable: SerializableStore = match serde_json::from_str(&contents) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[verifopt debug] failed to deserialize {} into SerializableStore: {e}",
+                dep_rewrite_store_path()
+            );
+            return None;
+        }
+    };
+    let store = Store::from(serializable);
+    eprintln!(
+        "[verifopt debug] loaded store: {} target entries, {} tag entries",
+        store.targets.len(),
+        store.tags.len()
+    );
+    Some(store)
 }
 
 
@@ -803,6 +832,8 @@ fn find_casts<'tcx>(
     Some(out)
 }
 
+static REWRITE_HITS: AtomicUsize = AtomicUsize::new(0);
+
 pub(super) fn rewrite_monomorphized<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
@@ -820,5 +851,13 @@ pub(super) fn rewrite_monomorphized<'tcx>(
         Some(shared) => compute_edits(shared, hash, &monomorphized_mir),
         None => return monomorphized_mir,
     };
+    if !edits.is_empty() {
+        let n = REWRITE_HITS.fetch_add(1, Ordering::Relaxed) + 1;
+        eprintln!(
+            "[verifopt debug] hit #{n}: {} edit(s) matched for {:?} (hash {hash:?})",
+            edits.len(),
+            instance.def_id(),
+        );
+    }
     apply_edits(tcx, monomorphized_mir, edits)
 }
