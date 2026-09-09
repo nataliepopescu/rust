@@ -1,4 +1,3 @@
-
 use rustc_data_structures::fx::{FxHashSet as HashSet};
 use rustc_data_structures::fx::{FxHashMap as HashMap};
 
@@ -164,8 +163,8 @@ impl From<SerializableStore> for Store {
     }
 }
 
-pub(super) fn dep_rewrite_store_path() -> &'static str {
-    "verifopt_store.json"
+pub(super) fn dep_rewrite_store_path() -> std::path::PathBuf {
+    "verifopt_store.json".into()
 }
 
 static SHARED_STORE: OnceLock<Option<Store>> = OnceLock::new();
@@ -176,7 +175,7 @@ fn load_shared_store() -> Option<Store> {
         Err(e) => {
             eprintln!(
                 "[verifopt debug] could not read {}: {e}",
-                dep_rewrite_store_path()
+                dep_rewrite_store_path().display()
             );
             return None;
         }
@@ -184,14 +183,14 @@ fn load_shared_store() -> Option<Store> {
     eprintln!(
         "[verifopt debug] read {} bytes from {}",
         contents.len(),
-        dep_rewrite_store_path()
+        dep_rewrite_store_path().display()
     );
     let serializable: SerializableStore = match serde_json::from_str(&contents) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
                 "[verifopt debug] failed to deserialize {} into SerializableStore: {e}",
-                dep_rewrite_store_path()
+                dep_rewrite_store_path().display()
             );
             return None;
         }
