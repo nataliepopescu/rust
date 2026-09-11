@@ -253,13 +253,50 @@ enum Edit {
 
 const MAX_POINTERS_CANDIDATES: usize = 4;
 
+/// Produces a small, fixed, deterministic DefPathHash for a primitive
+/// type - not a real DefId hash at all (primitives have no DefId), just
+/// a stand-in that lets the existing Vec<DefPathHash> key-component slot
+/// also represent primitive generic args (bool, char, ints, floats)
+/// without introducing a whole new key-component type and re-touching
+/// the serialization layer again.
+///
+/// Implemented identically on this side and monomorph's own
+/// rewrite.rs (see that file's own copy of this same function) - both
+/// sides must compute the same sentinel for the same primitive, on the
+/// same pinned rustc build, for the store's own keys to ever line up
+/// across the two, separate processes at all. A real DefPathHash
+/// coinciding with one of these specific, small sentinel values is
+/// astronomically unlikely, for the same reason DefPathHash collisions
+/// in general are treated as negligible risk elsewhere in this
+/// codebase - not a new, additional risk being introduced here.
+///
+/// FNV-1a, not anything cryptographic or rustc-internal - deliberately
+/// simple and self-contained so it's trivial to keep byte-for-byte
+/// identical between the two, separate copies of this function.
+fn primitive_ty_sentinel(tag: &str) -> DefPathHash {
+    fn fnv1a_64(bytes: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+    let h1 = fnv1a_64(tag.as_bytes());
+    // Different input for the second half (not just re-hashing h1's own
+    // bytes) so a short tag's own two halves don't trivially collide
+    // with each other.
+    let h2 = fnv1a_64(format!("{tag}#verifopt-sentinel").as_bytes());
+    DefPathHash(Fingerprint::new(h1, h2))
+}
+
 /// Mirrors monomorph's own to_genargs_hashes closure (see
-/// monomorph/src/rewrite.rs) - same restriction, for the same reason:
-/// only a concrete, non-generic Adt type (no further nested generic
-/// args of its own) can be hashed into a stable, cross-process-
-/// comparable DefPathHash at all. Anything else (a still-generic type
-/// parameter, a reference, a tuple, a further-generic Adt, etc.)
-/// returns None, since there's no DefPathHash to compute for it.
+/// monomorph/src/rewrite.rs) - handles a concrete, non-generic Adt type
+/// (no further nested generic args of its own) via a real DefPathHash,
+/// and primitive types (bool, char, ints, floats) via the sentinel
+/// helper above. Anything else (a still-generic type parameter, a
+/// reference, a tuple, a closure, etc.) returns None, since there's no
+/// stable, cross-process-comparable hash computed for it yet.
 ///
 /// Operates on rustc-internal GenericArgsRef rather than
 /// rustc_public::ty::GenericArgs, since this side of the pipeline never
@@ -274,13 +311,53 @@ fn to_genargs_hashes<'tcx>(
         let ty::GenericArgKind::Type(ty) = arg.kind() else {
             return None;
         };
-        let ty::Adt(adt_def, sub_genargs) = ty.kind() else {
-            return None;
+        let hash = match ty.kind() {
+            ty::Adt(adt_def, sub_genargs) => {
+                if !sub_genargs.is_empty() {
+                    return None;
+                }
+                tcx.def_path_hash(adt_def.did())
+            }
+            ty::Bool => primitive_ty_sentinel("prim:bool"),
+            ty::Char => primitive_ty_sentinel("prim:char"),
+            ty::Int(int_ty) => {
+                let tag = match int_ty {
+                    ty::IntTy::Isize => "prim:isize",
+                    ty::IntTy::I8 => "prim:i8",
+                    ty::IntTy::I16 => "prim:i16",
+                    ty::IntTy::I32 => "prim:i32",
+                    ty::IntTy::I64 => "prim:i64",
+                    ty::IntTy::I128 => "prim:i128",
+                };
+                primitive_ty_sentinel(tag)
+            }
+            ty::Uint(uint_ty) => {
+                let tag = match uint_ty {
+                    ty::UintTy::Usize => "prim:usize",
+                    ty::UintTy::U8 => "prim:u8",
+                    ty::UintTy::U16 => "prim:u16",
+                    ty::UintTy::U32 => "prim:u32",
+                    ty::UintTy::U64 => "prim:u64",
+                    ty::UintTy::U128 => "prim:u128",
+                };
+                primitive_ty_sentinel(tag)
+            }
+            ty::Float(float_ty) => {
+                let tag = match float_ty {
+                    ty::FloatTy::F16 => "prim:f16",
+                    ty::FloatTy::F32 => "prim:f32",
+                    ty::FloatTy::F64 => "prim:f64",
+                    ty::FloatTy::F128 => "prim:f128",
+                };
+                primitive_ty_sentinel(tag)
+            }
+            // References, tuples, closures, dyn types, etc. - not yet
+            // handled; returning None here means the caller-genargs use
+            // of this function panics rather than silently collapsing
+            // distinct instantiations onto the same key.
+            _ => return None,
         };
-        if !sub_genargs.is_empty() {
-            return None;
-        }
-        hashes.push(tcx.def_path_hash(adt_def.did()));
+        hashes.push(hash);
     }
     Some(hashes)
 }
