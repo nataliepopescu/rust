@@ -33,9 +33,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Default)]
 pub(super) struct Store {
-    pub targets: HashMap<(DefPathHash, usize), Vec<(DefPathHash, Option<Vec<DefPathHash>>)>>,
+    pub targets:
+        HashMap<(DefPathHash, usize, Vec<DefPathHash>), Vec<(DefPathHash, Option<Vec<DefPathHash>>)>>,
     pub tags: HashMap<
-        (DefPathHash, usize),
+        (DefPathHash, usize, Vec<DefPathHash>),
         Vec<(
             usize,                     /* bb */
             usize,                     /* stmt */
@@ -65,11 +66,11 @@ impl From<SerializableDefPathHash> for DefPathHash {
 #[derive(Serialize, Deserialize, Default)]
 struct SerializableStore {
     targets: Vec<(
-        (SerializableDefPathHash, usize),
+        (SerializableDefPathHash, usize, Vec<SerializableDefPathHash>),
         Vec<(SerializableDefPathHash, Option<Vec<SerializableDefPathHash>>)>,
     )>,
     tags: Vec<(
-        (SerializableDefPathHash, usize),
+        (SerializableDefPathHash, usize, Vec<SerializableDefPathHash>),
         Vec<(
             usize,
             usize,
@@ -90,13 +91,16 @@ impl From<&Store> for SerializableStore {
             opt.as_ref()
                 .map(|v| v.iter().map(|h| SerializableDefPathHash::from(*h)).collect())
         };
+        let conv_vec = |v: &Vec<DefPathHash>| -> Vec<SerializableDefPathHash> {
+            v.iter().map(|h| SerializableDefPathHash::from(*h)).collect()
+        };
         SerializableStore {
             targets: store
                 .targets
                 .iter()
-                .map(|((h, bb), v)| {
+                .map(|((h, bb, caller_genargs), v)| {
                     (
-                        (SerializableDefPathHash::from(*h), *bb),
+                        (SerializableDefPathHash::from(*h), *bb, conv_vec(caller_genargs)),
                         v.iter()
                             .map(|(h2, opt)| (SerializableDefPathHash::from(*h2), conv_opt_vec(opt)))
                             .collect(),
@@ -106,9 +110,9 @@ impl From<&Store> for SerializableStore {
             tags: store
                 .tags
                 .iter()
-                .map(|((h, bb), v)| {
+                .map(|((h, bb, caller_genargs), v)| {
                     (
-                        (SerializableDefPathHash::from(*h), *bb),
+                        (SerializableDefPathHash::from(*h), *bb, conv_vec(caller_genargs)),
                         v.iter()
                             .map(|(bb2, stmt, tag, h2, opt)| {
                                 (
@@ -132,13 +136,17 @@ impl From<SerializableStore> for Store {
         let conv_opt_vec = |opt: Option<Vec<SerializableDefPathHash>>| {
             opt.map(|v| v.into_iter().map(DefPathHash::from).collect())
         };
+        let conv_vec =
+            |v: Vec<SerializableDefPathHash>| -> Vec<DefPathHash> {
+                v.into_iter().map(DefPathHash::from).collect()
+            };
         Store {
             targets: s
                 .targets
                 .into_iter()
-                .map(|((h, bb), v)| {
+                .map(|((h, bb, caller_genargs), v)| {
                     (
-                        (DefPathHash::from(h), bb),
+                        (DefPathHash::from(h), bb, conv_vec(caller_genargs)),
                         v.into_iter()
                             .map(|(h2, opt)| (DefPathHash::from(h2), conv_opt_vec(opt)))
                             .collect(),
@@ -148,9 +156,9 @@ impl From<SerializableStore> for Store {
             tags: s
                 .tags
                 .into_iter()
-                .map(|((h, bb), v)| {
+                .map(|((h, bb, caller_genargs), v)| {
                     (
-                        (DefPathHash::from(h), bb),
+                        (DefPathHash::from(h), bb, conv_vec(caller_genargs)),
                         v.into_iter()
                             .map(|(bb2, stmt, tag, h2, opt)| {
                                 (bb2, stmt, tag, DefPathHash::from(h2), conv_opt_vec(opt))
@@ -245,12 +253,71 @@ enum Edit {
 
 const MAX_POINTERS_CANDIDATES: usize = 4;
 
-fn compute_edits(store: &Store, hash: DefPathHash, default: &Body<'_>) -> Vec<(usize, Edit)> {
+/// Mirrors monomorph's own to_genargs_hashes closure (see
+/// monomorph/src/rewrite.rs) - same restriction, for the same reason:
+/// only a concrete, non-generic Adt type (no further nested generic
+/// args of its own) can be hashed into a stable, cross-process-
+/// comparable DefPathHash at all. Anything else (a still-generic type
+/// parameter, a reference, a tuple, a further-generic Adt, etc.)
+/// returns None, since there's no DefPathHash to compute for it.
+///
+/// Operates on rustc-internal GenericArgsRef rather than
+/// rustc_public::ty::GenericArgs, since this side of the pipeline never
+/// goes through rustc_public's own stable-MIR conversion layer at all -
+/// unlike monomorph's own copy, which only ever sees the stable type.
+fn to_genargs_hashes<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    genargs: ty::GenericArgsRef<'tcx>,
+) -> Option<Vec<DefPathHash>> {
+    let mut hashes = Vec::with_capacity(genargs.len());
+    for arg in genargs {
+        let ty::GenericArgKind::Type(ty) = arg.kind() else {
+            return None;
+        };
+        let ty::Adt(adt_def, sub_genargs) = ty.kind() else {
+            return None;
+        };
+        if !sub_genargs.is_empty() {
+            return None;
+        }
+        hashes.push(tcx.def_path_hash(adt_def.did()));
+    }
+    Some(hashes)
+}
+
+fn compute_edits<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    store: &Store,
+    hash: DefPathHash,
+    caller_genargs: ty::GenericArgsRef<'tcx>,
+    default: &Body<'tcx>,
+) -> Vec<(usize, Edit)> {
+    // Panics rather than silently falling back to a more conservative
+    // edit (or skipping this function's own dispatch sites entirely) if
+    // the caller's own generic args can't be hashed - see the identical
+    // reasoning and panic on monomorph's own side (rewrite.rs). Falling
+    // back here would silently reintroduce exactly the span-collision
+    // risk this key extension exists to close: different monomorphized
+    // instantiations of the same generic function, sharing the same
+    // DefPathHash+bb, would fall through to matching store.targets/
+    // store.tags entries meant for a *different* instantiation instead
+    // of correctly finding nothing at all for this one.
+    let Some(caller_genargs_hash) = to_genargs_hashes(tcx, caller_genargs) else {
+        panic!(
+            "could not hash caller's own generic args for {hash:?} - \
+             genargs: {caller_genargs:?} - without this, this dispatch \
+             site's own key would collapse different monomorphized \
+             instantiations of the same generic function onto the same \
+             store entry, silently applying a different instantiation's \
+             own rewrite"
+        );
+    };
+
     default
         .basic_blocks
         .indices()
         .filter_map(|bb| {
-            let key = &(hash, bb.as_usize());
+            let key = &(hash, bb.as_usize(), caller_genargs_hash.clone());
 
             let tags = store.tags.get(key);
             let targets = store.targets.get(key)?;
@@ -847,7 +914,7 @@ pub(super) fn rewrite_monomorphized<'tcx>(
 
     let hash = tcx.def_path_hash(instance.def_id());
     let edits = match SHARED_STORE.get_or_init(load_shared_store) {
-        Some(shared) => compute_edits(shared, hash, &monomorphized_mir),
+        Some(shared) => compute_edits(tcx, shared, hash, instance.args, &monomorphized_mir),
         None => return monomorphized_mir,
     };
     if !edits.is_empty() {
