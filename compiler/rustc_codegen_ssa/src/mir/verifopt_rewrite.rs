@@ -902,6 +902,33 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
     body
 }
 
+/// Safe wrapper around tcx.def_path_hash_to_def_id - that function's
+/// own internal hook (def_path_hash_to_def_id_extern, in
+/// rustc_metadata's own cstore_impl.rs) calls bug!() outright
+/// ("uninterned StableCrateId") if hash's own crate was never loaded
+/// into this compilation session at all, rather than returning None
+/// gracefully - so wrapping it in .ok_or(())? or .unwrap() doesn't
+/// actually protect anything, since the panic happens *inside* the
+/// call, before it would ever get a chance to return at all.
+///
+/// This situation isn't a rare edge case here: a dependency crate's
+/// own compilation session never loads a downstream consumer's own
+/// crate metadata at all (that would be a circular dependency, which
+/// cargo/rustc themselves never allow to exist in the first place) -
+/// so a rewrite whose target type is only ever defined in a downstream
+/// consumer of the crate currently being compiled will always hit this,
+/// deterministically, every time. Checking tcx.untracked().
+/// stable_crate_ids first - the same map the internal hook itself
+/// reads from, just without the panic-on-miss - lets this decline
+/// gracefully (leaving the original, vtable-based dyn call in place)
+/// rather than crashing the whole compilation.
+fn safe_def_path_hash_to_def_id(tcx: TyCtxt<'_>, hash: DefPathHash) -> Option<rustc_span::def_id::DefId> {
+    if !tcx.untracked().stable_crate_ids.read().contains_key(&hash.stable_crate_id()) {
+        return None;
+    }
+    tcx.def_path_hash_to_def_id(hash)
+}
+
 fn fn_op<'tcx>(
     tcx: TyCtxt<'tcx>,
     hash: DefPathHash,
@@ -909,14 +936,14 @@ fn fn_op<'tcx>(
     gen_args: &'tcx List<GenericArg<'tcx>>,
     span: Span,
 ) -> Result<(Operand<'tcx>, Ty<'tcx>), ()> {
-    let target_did = tcx.def_path_hash_to_def_id(hash).unwrap();
+    let target_did = safe_def_path_hash_to_def_id(tcx, hash).ok_or(())?;
 
     let args = match &self_hashes {
         Some(hashes) => {
             let tys: Vec<Ty<'tcx>> = hashes
                 .iter()
                 .map(|h| {
-                    let did = tcx.def_path_hash_to_def_id(*h).ok_or(())?;
+                    let did = safe_def_path_hash_to_def_id(tcx, *h).ok_or(())?;
                     Ok(tcx.type_of(did).instantiate_identity())
                 })
                 .collect::<Result<Vec<_>, ()>>()?;
@@ -952,7 +979,7 @@ fn fn_op<'tcx>(
     let raw_self_ty = if tcx.def_kind(parent_did) == DefKind::Trait {
         match &self_hashes {
             Some(hashes) if !hashes.is_empty() => {
-                let self_did = tcx.def_path_hash_to_def_id(hashes[0]).ok_or(())?;
+                let self_did = safe_def_path_hash_to_def_id(tcx, hashes[0]).ok_or(())?;
                 tcx.type_of(self_did).instantiate_identity()
             }
             _ => return Err(()),
