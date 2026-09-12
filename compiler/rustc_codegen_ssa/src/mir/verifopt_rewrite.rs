@@ -290,13 +290,124 @@ fn primitive_ty_sentinel(tag: &str) -> DefPathHash {
     DefPathHash(Fingerprint::new(h1, h2))
 }
 
+/// Combines a tag with an ordered list of nested hashes into a single,
+/// deterministic sentinel - used for compound types (currently just
+/// tuples) whose own identity depends on an ordered set of nested
+/// types, each of which may itself already be hashed via hash_ty/
+/// primitive_ty_sentinel. Relies on DefPathHash's own Debug output
+/// being identical on both this side and monomorph's own copy of this
+/// same function, since both operate on the exact same, single
+/// rustc-internal DefPathHash type - not something particular to this
+/// side alone.
+fn combine_hashes(tag: &str, hashes: &[DefPathHash]) -> DefPathHash {
+    let joined = hashes.iter().map(|h| format!("{h:?}")).collect::<Vec<_>>().join(",");
+    primitive_ty_sentinel(&format!("{tag}:[{joined}]"))
+}
+
+/// Recursively hashes a single rustc-internal Ty into a stable,
+/// cross-process-comparable DefPathHash, mirroring monomorph's own
+/// hash_ty (see that file's own copy of this same function) - handles
+/// a concrete, non-generic Adt type via a real DefPathHash, primitive
+/// types via the sentinel helper, and tuples by recursively hashing
+/// each element and combining. Returns None for anything else (a
+/// still-generic type parameter, a reference, a closure, etc.), since
+/// there's no stable, cross-process-comparable hash computed for it
+/// yet. A top-level function rather than a closure specifically so it
+/// can call itself for tuple elements - closures can't recurse by name
+/// in Rust.
+fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
+    Some(match ty.kind() {
+        ty::Adt(adt_def, sub_genargs) => {
+            if !sub_genargs.is_empty() {
+                return None;
+            }
+            tcx.def_path_hash(adt_def.did())
+        }
+        ty::Bool => primitive_ty_sentinel("prim:bool"),
+        ty::Char => primitive_ty_sentinel("prim:char"),
+        ty::Int(int_ty) => {
+            let tag = match int_ty {
+                ty::IntTy::Isize => "prim:isize",
+                ty::IntTy::I8 => "prim:i8",
+                ty::IntTy::I16 => "prim:i16",
+                ty::IntTy::I32 => "prim:i32",
+                ty::IntTy::I64 => "prim:i64",
+                ty::IntTy::I128 => "prim:i128",
+            };
+            primitive_ty_sentinel(tag)
+        }
+        ty::Uint(uint_ty) => {
+            let tag = match uint_ty {
+                ty::UintTy::Usize => "prim:usize",
+                ty::UintTy::U8 => "prim:u8",
+                ty::UintTy::U16 => "prim:u16",
+                ty::UintTy::U32 => "prim:u32",
+                ty::UintTy::U64 => "prim:u64",
+                ty::UintTy::U128 => "prim:u128",
+            };
+            primitive_ty_sentinel(tag)
+        }
+        ty::Float(float_ty) => {
+            let tag = match float_ty {
+                ty::FloatTy::F16 => "prim:f16",
+                ty::FloatTy::F32 => "prim:f32",
+                ty::FloatTy::F64 => "prim:f64",
+                ty::FloatTy::F128 => "prim:f128",
+            };
+            primitive_ty_sentinel(tag)
+        }
+        ty::Tuple(elems) => {
+            let elem_hashes: Option<Vec<DefPathHash>> =
+                elems.iter().map(|t| hash_ty(tcx, t)).collect();
+            combine_hashes("prim:tuple", &elem_hashes?)
+        }
+        // Regions/lifetimes are deliberately ignored here (not part of
+        // the tag, not hashed) - they're already erased throughout this
+        // whole pipeline, and don't affect which concrete
+        // devirtualization target applies.
+        ty::Ref(_region, inner_ty, mutability) => {
+            let tag = match mutability {
+                ty::Mutability::Not => "prim:ref:not",
+                ty::Mutability::Mut => "prim:ref:mut",
+            };
+            combine_hashes(tag, &[hash_ty(tcx, *inner_ty)?])
+        }
+        ty::RawPtr(inner_ty, mutability) => {
+            let tag = match mutability {
+                ty::Mutability::Not => "prim:rawptr:not",
+                ty::Mutability::Mut => "prim:rawptr:mut",
+            };
+            combine_hashes(tag, &[hash_ty(tcx, *inner_ty)?])
+        }
+        ty::Slice(inner_ty) => {
+            combine_hashes("prim:slice", &[hash_ty(tcx, *inner_ty)?])
+        }
+        ty::FnPtr(sig_tys, _fn_header) => {
+            let fn_sig_tys = sig_tys.skip_binder();
+            let elem_hashes: Option<Vec<DefPathHash>> = fn_sig_tys
+                .inputs_and_output
+                .iter()
+                .map(|t| hash_ty(tcx, t))
+                .collect();
+            combine_hashes("prim:fnptr", &elem_hashes?)
+        }
+        // Arrays are deliberately not handled yet - unlike everything
+        // above, an array's own type also depends on a const-generic
+        // length (the "5" in [u32; 5]), which isn't just another Ty to
+        // recurse into - extracting a stable, cross-process-comparable
+        // hash for an arbitrary const expression is a genuinely
+        // different, harder problem than anything handled so far.
+        // Closures, dyn types, coroutines, etc. - also not yet handled;
+        // returning None here means the caller-genargs use of this
+        // function panics rather than silently collapsing distinct
+        // instantiations onto the same key.
+        _ => return None,
+    })
+}
+
 /// Mirrors monomorph's own to_genargs_hashes closure (see
-/// monomorph/src/rewrite.rs) - handles a concrete, non-generic Adt type
-/// (no further nested generic args of its own) via a real DefPathHash,
-/// and primitive types (bool, char, ints, floats) via the sentinel
-/// helper above. Anything else (a still-generic type parameter, a
-/// reference, a tuple, a closure, etc.) returns None, since there's no
-/// stable, cross-process-comparable hash computed for it yet.
+/// monomorph/src/rewrite.rs) - delegates the actual per-type hashing to
+/// hash_ty above.
 ///
 /// Operates on rustc-internal GenericArgsRef rather than
 /// rustc_public::ty::GenericArgs, since this side of the pipeline never
@@ -311,57 +422,16 @@ fn to_genargs_hashes<'tcx>(
         let ty::GenericArgKind::Type(ty) = arg.kind() else {
             return None;
         };
-        let hash = match ty.kind() {
-            ty::Adt(adt_def, sub_genargs) => {
-                if !sub_genargs.is_empty() {
-                    return None;
-                }
-                tcx.def_path_hash(adt_def.did())
-            }
-            ty::Bool => primitive_ty_sentinel("prim:bool"),
-            ty::Char => primitive_ty_sentinel("prim:char"),
-            ty::Int(int_ty) => {
-                let tag = match int_ty {
-                    ty::IntTy::Isize => "prim:isize",
-                    ty::IntTy::I8 => "prim:i8",
-                    ty::IntTy::I16 => "prim:i16",
-                    ty::IntTy::I32 => "prim:i32",
-                    ty::IntTy::I64 => "prim:i64",
-                    ty::IntTy::I128 => "prim:i128",
-                };
-                primitive_ty_sentinel(tag)
-            }
-            ty::Uint(uint_ty) => {
-                let tag = match uint_ty {
-                    ty::UintTy::Usize => "prim:usize",
-                    ty::UintTy::U8 => "prim:u8",
-                    ty::UintTy::U16 => "prim:u16",
-                    ty::UintTy::U32 => "prim:u32",
-                    ty::UintTy::U64 => "prim:u64",
-                    ty::UintTy::U128 => "prim:u128",
-                };
-                primitive_ty_sentinel(tag)
-            }
-            ty::Float(float_ty) => {
-                let tag = match float_ty {
-                    ty::FloatTy::F16 => "prim:f16",
-                    ty::FloatTy::F32 => "prim:f32",
-                    ty::FloatTy::F64 => "prim:f64",
-                    ty::FloatTy::F128 => "prim:f128",
-                };
-                primitive_ty_sentinel(tag)
-            }
-            // References, tuples, closures, dyn types, etc. - not yet
-            // handled; returning None here means the caller-genargs use
-            // of this function panics rather than silently collapsing
-            // distinct instantiations onto the same key.
-            _ => return None,
-        };
-        hashes.push(hash);
+        hashes.push(hash_ty(tcx, ty)?);
     }
     Some(hashes)
 }
 
+// The store.targets.keys()/store.tags.keys() check below is order-
+// independent (just checks whether any entry matches at all), so
+// HashMap iteration order never affects its result - safe to allow,
+// same reasoning as the existing #[allow(...)] elsewhere in this file.
+#[allow(rustc::potential_query_instability)]
 fn compute_edits<'tcx>(
     tcx: TyCtxt<'tcx>,
     store: &Store,
@@ -369,6 +439,22 @@ fn compute_edits<'tcx>(
     caller_genargs: ty::GenericArgsRef<'tcx>,
     default: &Body<'tcx>,
 ) -> Vec<(usize, Edit)> {
+    // compute_edits runs for every single monomorphized function/
+    // Instance codegen'd across the entire program (called from
+    // rewrite_monomorphized, itself called unconditionally from
+    // codegen_mir) - not just ones genuinely relevant to whatever
+    // dispatch sites discovery actually found. The overwhelming
+    // majority of functions in any real program - including
+    // compiler/std-generated code that has nothing to do with the
+    // program's own source at all, e.g. std::rt::lang_start's own
+    // internal closure - have no entry in the store whatsoever. Bail
+    // out here, before ever touching caller_genargs, rather than
+    // paying the hashing cost (and risking the panic below) for
+    // something this function was never going to apply to anyway.
+    if !store.targets.keys().chain(store.tags.keys()).any(|(h, _, _)| *h == hash) {
+        return Vec::new();
+    }
+
     // Panics rather than silently falling back to a more conservative
     // edit (or skipping this function's own dispatch sites entirely) if
     // the caller's own generic args can't be hashed - see the identical
