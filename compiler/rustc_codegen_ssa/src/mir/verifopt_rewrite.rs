@@ -172,7 +172,10 @@ impl From<SerializableStore> for Store {
 }
 
 pub(super) fn dep_rewrite_store_path() -> std::path::PathBuf {
-    "verifopt_store.json".into()
+    match std::env::var_os("VERIFOPT_STORE_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir).join("verifopt_store.json"),
+        None => "verifopt_store.json".into(),
+    }
 }
 
 static SHARED_STORE: OnceLock<Option<Store>> = OnceLock::new();
@@ -390,6 +393,34 @@ fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
                 .map(|t| hash_ty(tcx, t))
                 .collect();
             combine_hashes("prim:fnptr", &elem_hashes?)
+        }
+        // Only the common case is handled: exactly one predicate, and
+        // that predicate is a plain trait bound (Send/Sync-style
+        // auto-traits, or an associated-type binding like
+        // `dyn Iterator<Item = u32>`, both return None here - not yet
+        // handled, same as everything else this comment block already
+        // covers).
+        ty::Dynamic(predicates, _region) => {
+            let [binder] = predicates.as_slice() else {
+                return None;
+            };
+            let ty::ExistentialPredicate::Trait(trait_ref) = binder.skip_binder() else {
+                return None;
+            };
+            let trait_hash = tcx.def_path_hash(trait_ref.def_id);
+            let genarg_hashes: Option<Vec<DefPathHash>> = trait_ref
+                .args
+                .into_iter()
+                .map(|arg| {
+                    let ty::GenericArgKind::Type(t) = arg.kind() else {
+                        return None;
+                    };
+                    hash_ty(tcx, t)
+                })
+                .collect();
+            let mut all_hashes = vec![trait_hash];
+            all_hashes.extend(genarg_hashes?);
+            combine_hashes("prim:dyn", &all_hashes)
         }
         // Arrays are deliberately not handled yet - unlike everything
         // above, an array's own type also depends on a const-generic
