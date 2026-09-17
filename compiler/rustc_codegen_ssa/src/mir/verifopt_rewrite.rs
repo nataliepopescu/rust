@@ -236,11 +236,42 @@ fn mir_dump_file() -> &'static Mutex<File> {
     })
 }
 
+static EDIT_KIND_STATS_FILE: OnceLock<Mutex<File>> = OnceLock::new();
+
+fn edit_kind_stats_file() -> &'static Mutex<File> {
+    EDIT_KIND_STATS_FILE.get_or_init(|| {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("verifopt_edit_kind_stats.txt")
+            .expect("failed to open verifopt_edit_kind_stats.txt for writing");
+        Mutex::new(file)
+    })
+}
+
+/// Appends one line recording a single, successfully-applied rewrite's
+/// own kind - called only at the point within each of apply_edits' own
+/// three match arms (Single/Pointers/Tagged) where the rewrite has
+/// actually, genuinely gone through, past every earlier continue-style
+/// bail-out for an unsupported or mismatched case - so this counts
+/// applied rewrites, not merely attempted ones. Appends (like
+/// mir_dump_file above) rather than overwrites, since apply_edits is
+/// called once per rewritten function within a single rustc invocation,
+/// and a full build spans several, separate invocations (one per
+/// crate) - appending is what lets counts naturally accumulate across
+/// both, without needing any kind of end-of-process hook at all (which
+/// `static` values in Rust don't get: their own Drop, if any, never
+/// runs at process exit).
+fn log_edit_kind(kind: &str) {
+    let mut file = edit_kind_stats_file().lock().unwrap();
+    let _ = writeln!(file, "{kind}");
+}
+
 fn dump_body<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, label: &str) {
     let mut buf = Vec::new();
 
     let writer = MirWriter::new(tcx);
-    let _ = writer.write_mir_fn(body, &mut buf);
+    let _ = ty::print::with_no_trimmed_paths!(writer.write_mir_fn(body, &mut buf));
 
     let mut file = mir_dump_file().lock().unwrap();
     let _ = writeln!(file, "\n######### MIR {label} #########");
@@ -607,6 +638,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                 {
                     *func = fnc;
                     *a = new_args;
+                    log_edit_kind("single");
                 }
             }
 
@@ -831,6 +863,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                         ));
                     }
                 }
+                log_edit_kind("pointers");
             }
 
             Edit::Tagged(sites) => {
@@ -921,6 +954,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                         targets: SwitchTargets::new(arms.into_iter(), fallback),
                     },
                 });
+                log_edit_kind("tagged");
             }
         }
     }
@@ -967,17 +1001,30 @@ fn fn_op<'tcx>(
     gen_args: &'tcx List<GenericArg<'tcx>>,
     span: Span,
 ) -> Result<(Operand<'tcx>, Ty<'tcx>), ()> {
-    let target_did = safe_def_path_hash_to_def_id(tcx, hash).ok_or(())?;
+    let target_did = match safe_def_path_hash_to_def_id(tcx, hash) {
+        Some(did) => did,
+        None => {
+            eprintln!("[verifopt debug][fn_op] FAILED at target_did resolution, hash={:?}", hash);
+            return Err(());
+        }
+    };
 
     let args = match &self_hashes {
         Some(hashes) => {
-            let tys: Vec<Ty<'tcx>> = hashes
+            let tys: Vec<Ty<'tcx>> = match hashes
                 .iter()
                 .map(|h| {
                     let did = safe_def_path_hash_to_def_id(tcx, *h).ok_or(())?;
                     Ok(tcx.type_of(did).instantiate_identity())
                 })
-                .collect::<Result<Vec<_>, ()>>()?;
+                .collect::<Result<Vec<_>, ()>>()
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("[verifopt debug][fn_op] FAILED at self_hashes -> tys resolution, target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                    return Err(());
+                }
+            };
             let arg_list: Vec<GenericArg<'tcx>> = tys.into_iter().map(|t| t.into()).collect();
             tcx.mk_args(&arg_list)
         }
@@ -986,6 +1033,13 @@ fn fn_op<'tcx>(
 
     let _ = CRATE_NAME.get_or_init(|| tcx.crate_name(LOCAL_CRATE).to_string());
     if args.len() != tcx.generics_of(target_did).count() {
+        eprintln!(
+            "[verifopt debug][fn_op] FAILED at args.len() check: target_did={:?} args={:?} args.len()={:?} expected_count={:?}",
+            target_did,
+            args,
+            args.len(),
+            tcx.generics_of(target_did).count(),
+        );
         FN_OP_ARGS_MISMATCH.fetch_add(1, Ordering::Relaxed);
         return Err(());
     }
@@ -994,7 +1048,10 @@ fn fn_op<'tcx>(
     let instance =
         match Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), target_did, args) {
             Ok(Some(inst)) => inst,
-            _ => return Err(()),
+            other => {
+                eprintln!("[verifopt debug][fn_op] FAILED at Instance::try_resolve: target_did={:?} args={:?} result={:?}", target_did, args, other);
+                return Err(());
+            }
         };
 
     let fn_ty = instance.ty(tcx, TypingEnv::fully_monomorphized());
@@ -1010,10 +1067,19 @@ fn fn_op<'tcx>(
     let raw_self_ty = if tcx.def_kind(parent_did) == DefKind::Trait {
         match &self_hashes {
             Some(hashes) if !hashes.is_empty() => {
-                let self_did = safe_def_path_hash_to_def_id(tcx, hashes[0]).ok_or(())?;
+                let self_did = match safe_def_path_hash_to_def_id(tcx, hashes[0]) {
+                    Some(did) => did,
+                    None => {
+                        eprintln!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                        return Err(());
+                    }
+                };
                 tcx.type_of(self_did).instantiate_identity()
             }
-            _ => return Err(()),
+            _ => {
+                eprintln!("[verifopt debug][fn_op] FAILED: parent is a Trait but self_hashes is None/empty: target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                return Err(());
+            }
         }
     } else {
         tcx.type_of(parent_did).instantiate(tcx, instance.args)
@@ -1021,9 +1087,13 @@ fn fn_op<'tcx>(
     let self_ty = match tcx.try_normalize_erasing_regions(TypingEnv::fully_monomorphized(), raw_self_ty)
     {
         Ok(ty) => ty,
-        Err(_) => return Err(()),
+        Err(_) => {
+            eprintln!("[verifopt debug][fn_op] FAILED at self_ty normalization: target_did={:?} raw_self_ty={:?}", target_did, raw_self_ty);
+            return Err(());
+        }
     };
 
+    eprintln!("[verifopt debug][fn_op] SUCCESS: target_did={:?} self_ty={:?}", target_did, self_ty);
     Ok((op, self_ty))
 }
 
@@ -1134,6 +1204,13 @@ pub(super) fn rewrite_monomorphized<'tcx>(
     }
 
     let hash = tcx.def_path_hash(instance.def_id());
+    eprintln!(
+        "[verifopt debug][rewrite_monomorphized entry] instance={:?} def_id={:?} hash={:?} crate={:?}",
+        instance,
+        instance.def_id(),
+        hash,
+        tcx.crate_name(instance.def_id().krate),
+    );
     let edits = match SHARED_STORE.get_or_init(load_shared_store) {
         Some(shared) => compute_edits(tcx, shared, hash, instance.args, &monomorphized_mir),
         None => return monomorphized_mir,
