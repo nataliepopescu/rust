@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use tracing::debug;
+
 #[derive(Default)]
 pub(super) struct Store {
     pub targets:
@@ -184,14 +186,14 @@ fn load_shared_store() -> Option<Store> {
     let contents = match std::fs::read_to_string(dep_rewrite_store_path()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
+            debug!(
                 "[verifopt debug] could not read {}: {e}",
                 dep_rewrite_store_path().display()
             );
             return None;
         }
     };
-    eprintln!(
+    debug!(
         "[verifopt debug] read {} bytes from {}",
         contents.len(),
         dep_rewrite_store_path().display()
@@ -199,7 +201,7 @@ fn load_shared_store() -> Option<Store> {
     let serializable: SerializableStore = match serde_json::from_str(&contents) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
+            debug!(
                 "[verifopt debug] failed to deserialize {} into SerializableStore: {e}",
                 dep_rewrite_store_path().display()
             );
@@ -207,7 +209,7 @@ fn load_shared_store() -> Option<Store> {
         }
     };
     let store = Store::from(serializable);
-    eprintln!(
+    debug!(
         "[verifopt debug] loaded store: {} target entries, {} tag entries",
         store.targets.len(),
         store.tags.len()
@@ -1004,7 +1006,7 @@ fn fn_op<'tcx>(
     let target_did = match safe_def_path_hash_to_def_id(tcx, hash) {
         Some(did) => did,
         None => {
-            eprintln!("[verifopt debug][fn_op] FAILED at target_did resolution, hash={:?}", hash);
+            debug!("[verifopt debug][fn_op] FAILED at target_did resolution, hash={:?}", hash);
             return Err(());
         }
     };
@@ -1021,7 +1023,7 @@ fn fn_op<'tcx>(
             {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("[verifopt debug][fn_op] FAILED at self_hashes -> tys resolution, target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                    debug!("[verifopt debug][fn_op] FAILED at self_hashes -> tys resolution, target_did={:?} self_hashes={:?}", target_did, self_hashes);
                     return Err(());
                 }
             };
@@ -1033,7 +1035,7 @@ fn fn_op<'tcx>(
 
     let _ = CRATE_NAME.get_or_init(|| tcx.crate_name(LOCAL_CRATE).to_string());
     if args.len() != tcx.generics_of(target_did).count() {
-        eprintln!(
+        debug!(
             "[verifopt debug][fn_op] FAILED at args.len() check: target_did={:?} args={:?} args.len()={:?} expected_count={:?}",
             target_did,
             args,
@@ -1049,7 +1051,7 @@ fn fn_op<'tcx>(
         match Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), target_did, args) {
             Ok(Some(inst)) => inst,
             other => {
-                eprintln!("[verifopt debug][fn_op] FAILED at Instance::try_resolve: target_did={:?} args={:?} result={:?}", target_did, args, other);
+                debug!("[verifopt debug][fn_op] FAILED at Instance::try_resolve: target_did={:?} args={:?} result={:?}", target_did, args, other);
                 return Err(());
             }
         };
@@ -1070,14 +1072,14 @@ fn fn_op<'tcx>(
                 let self_did = match safe_def_path_hash_to_def_id(tcx, hashes[0]) {
                     Some(did) => did,
                     None => {
-                        eprintln!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                        debug!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
                         return Err(());
                     }
                 };
                 tcx.type_of(self_did).instantiate_identity()
             }
             _ => {
-                eprintln!("[verifopt debug][fn_op] FAILED: parent is a Trait but self_hashes is None/empty: target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                debug!("[verifopt debug][fn_op] FAILED: parent is a Trait but self_hashes is None/empty: target_did={:?} self_hashes={:?}", target_did, self_hashes);
                 return Err(());
             }
         }
@@ -1088,12 +1090,12 @@ fn fn_op<'tcx>(
     {
         Ok(ty) => ty,
         Err(_) => {
-            eprintln!("[verifopt debug][fn_op] FAILED at self_ty normalization: target_did={:?} raw_self_ty={:?}", target_did, raw_self_ty);
+            debug!("[verifopt debug][fn_op] FAILED at self_ty normalization: target_did={:?} raw_self_ty={:?}", target_did, raw_self_ty);
             return Err(());
         }
     };
 
-    eprintln!("[verifopt debug][fn_op] SUCCESS: target_did={:?} self_ty={:?}", target_did, self_ty);
+    debug!("[verifopt debug][fn_op] SUCCESS: target_did={:?} self_ty={:?}", target_did, self_ty);
     Ok((op, self_ty))
 }
 
@@ -1204,7 +1206,7 @@ pub(super) fn rewrite_monomorphized<'tcx>(
     }
 
     let hash = tcx.def_path_hash(instance.def_id());
-    eprintln!(
+    debug!(
         "[verifopt debug][rewrite_monomorphized entry] instance={:?} def_id={:?} hash={:?} crate={:?}",
         instance,
         instance.def_id(),
@@ -1217,7 +1219,7 @@ pub(super) fn rewrite_monomorphized<'tcx>(
     };
     if !edits.is_empty() {
         let n = REWRITE_HITS.fetch_add(1, Ordering::Relaxed) + 1;
-        eprintln!(
+        debug!(
             "[verifopt debug] hit #{n}: {} edit(s) matched for {:?} (hash {hash:?})",
             edits.len(),
             instance.def_id(),
