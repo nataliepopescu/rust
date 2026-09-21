@@ -47,11 +47,19 @@ pub(super) struct Store {
             Option<Vec<DefPathHash>>,  /* concrete generic args, when resolvable */
         )>,
     >,
+    /// Every sentinel hash (see primitive_ty_sentinel/combine_hashes)
+    /// this store's own targets/tags entries reference, paired with the
+    /// shape it was computed from - see TyShape's own doc comment for
+    /// why this is needed at all. Carries discovery's own
+    /// SHAPE_REGISTRY across the process boundary (see
+    /// load_shared_store) into a later, separate rewrite-application
+    /// process that may never independently rehash the same type.
+    pub shapes: HashMap<DefPathHash, TyShape>,
 }
 
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct SerializableDefPathHash([u8; 16]);
+pub(super) struct SerializableDefPathHash([u8; 16]);
 
 impl From<DefPathHash> for SerializableDefPathHash {
     fn from(dph: DefPathHash) -> Self {
@@ -81,6 +89,8 @@ struct SerializableStore {
             Option<Vec<SerializableDefPathHash>>,
         )>,
     )>,
+    #[serde(default)]
+    shapes: Vec<(SerializableDefPathHash, TyShape)>,
 }
 
 impl From<&Store> for SerializableStore {
@@ -129,6 +139,11 @@ impl From<&Store> for SerializableStore {
                     )
                 })
                 .collect(),
+            shapes: store
+                .shapes
+                .iter()
+                .map(|(h, shape)| (SerializableDefPathHash::from(*h), shape.clone()))
+                .collect(),
         }
     }
 }
@@ -168,6 +183,11 @@ impl From<SerializableStore> for Store {
                             .collect(),
                     )
                 })
+                .collect(),
+            shapes: s
+                .shapes
+                .into_iter()
+                .map(|(h, shape)| (DefPathHash::from(h), shape))
                 .collect(),
         }
     }
@@ -210,10 +230,25 @@ fn load_shared_store() -> Option<Store> {
     };
     let store = Store::from(serializable);
     debug!(
-        "[verifopt debug] loaded store: {} target entries, {} tag entries",
+        "[verifopt debug] loaded store: {} target entries, {} tag entries, {} shape entries",
         store.targets.len(),
-        store.tags.len()
+        store.tags.len(),
+        store.shapes.len()
     );
+    // Seed the shape registry from the store's own shapes, read off disk -
+    // this is what lets ty_from_shape (see fn_op) resolve a sentinel hash
+    // this process never independently computed itself, e.g. one only
+    // ever hashed during discovery's own, separate, earlier run.
+    {
+        let mut registry = shape_registry().lock().unwrap();
+        // Iteration order genuinely doesn't matter here - each entry is
+        // independently inserted into a separate map, so any order
+        // produces the same final result.
+        #[allow(rustc::potential_query_instability)]
+        for (hash, shape) in &store.shapes {
+            registry.entry(*hash).or_insert_with(|| shape.clone());
+        }
+    }
     Some(store)
 }
 
@@ -351,6 +386,207 @@ fn combine_hashes(tag: &str, hashes: &[DefPathHash]) -> DefPathHash {
 /// yet. A top-level function rather than a closure specifically so it
 /// can call itself for tuple elements - closures can't recurse by name
 /// in Rust.
+/// A serializable description of a type's own structure, for types
+/// hashed via a sentinel (primitive_ty_sentinel/combine_hashes) rather
+/// than a real DefPathHash - a sentinel is a one-way FNV hash with no
+/// actual DefId behind it at all, so there's no way to recover the
+/// original type from the hash alone. This carries enough structure to
+/// rebuild an equivalent Ty within any TyCtxt, once paired with its own
+/// sentinel hash in a lookup table (see SHAPE_REGISTRY below and
+/// Store's own `shapes` field) - mirrors hash_ty's own match arms as
+/// data, one variant per shape hash_ty already knows how to hash.
+/// ADT is deliberately absent - a nominal type's own DefPathHash is
+/// already a real DefId hash, already resolvable via
+/// safe_def_path_hash_to_def_id with no shape data needed at all.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(super) enum TyShape {
+    Primitive(String),
+    Tuple(Vec<TyShape>),
+    Ref(bool /* mutable */, Box<TyShape>),
+    RawPtr(bool /* mutable */, Box<TyShape>),
+    Slice(Box<TyShape>),
+    FnPtr(Vec<TyShape>) /* inputs_and_output, in order */,
+    Dyn(SerializableDefPathHash /* trait DefId hash */, Vec<TyShape>),
+}
+
+/// Sentinel hash -> the shape it was computed from, populated as a side
+/// effect every time hash_ty computes a sentinel-based hash (see the
+/// record_shape calls added to hash_ty's own match arms below).
+/// Consulted by ty_from_shape (see below fn_op) once
+/// safe_def_path_hash_to_def_id already failed to resolve a hash to a
+/// real DefId - which is always the case for a sentinel, since it was
+/// never a real DefId hash to begin with. Populated fresh within
+/// whichever single rustc process is currently running (see
+/// load_shared_store, which seeds this from the store's own `shapes`
+/// field read off disk, carrying discovery's own shapes across the
+/// process boundary into a later, separate rewrite-application
+/// process that never independently rehashes the same type at all).
+static SHAPE_REGISTRY: OnceLock<Mutex<HashMap<DefPathHash, TyShape>>> = OnceLock::new();
+
+fn shape_registry() -> &'static Mutex<HashMap<DefPathHash, TyShape>> {
+    SHAPE_REGISTRY.get_or_init(|| Mutex::new(HashMap::default()))
+}
+
+fn record_shape(hash: DefPathHash, shape: TyShape) -> DefPathHash {
+    shape_registry().lock().unwrap().insert(hash, shape);
+    hash
+}
+
+/// Rebuilds a genuine Ty<'tcx> from a TyShape, within the current tcx -
+/// the reverse of hash_ty, for shapes that were never a real DefId hash
+/// at all. Mirrors hash_ty's own match arms, one direction each.
+fn ty_from_shape<'tcx>(tcx: TyCtxt<'tcx>, shape: &TyShape) -> Option<Ty<'tcx>> {
+    Some(match shape {
+        TyShape::Primitive(tag) => match tag.as_str() {
+            "prim:bool" => tcx.types.bool,
+            "prim:char" => tcx.types.char,
+            "prim:isize" => tcx.types.isize,
+            "prim:i8" => tcx.types.i8,
+            "prim:i16" => tcx.types.i16,
+            "prim:i32" => tcx.types.i32,
+            "prim:i64" => tcx.types.i64,
+            "prim:i128" => tcx.types.i128,
+            "prim:usize" => tcx.types.usize,
+            "prim:u8" => tcx.types.u8,
+            "prim:u16" => tcx.types.u16,
+            "prim:u32" => tcx.types.u32,
+            "prim:u64" => tcx.types.u64,
+            "prim:u128" => tcx.types.u128,
+            "prim:f16" => tcx.types.f16,
+            "prim:f32" => tcx.types.f32,
+            "prim:f64" => tcx.types.f64,
+            "prim:f128" => tcx.types.f128,
+            _ => return None,
+        },
+        TyShape::Tuple(elems) => {
+            let tys: Vec<Ty<'tcx>> =
+                elems.iter().map(|e| ty_from_shape(tcx, e)).collect::<Option<_>>()?;
+            Ty::new_tup(tcx, &tys)
+        }
+        TyShape::Ref(mutable, inner) => {
+            let inner_ty = ty_from_shape(tcx, inner)?;
+            let mutability = if *mutable { ty::Mutability::Mut } else { ty::Mutability::Not };
+            Ty::new_ref(tcx, tcx.lifetimes.re_erased, inner_ty, mutability)
+        }
+        TyShape::RawPtr(mutable, inner) => {
+            let inner_ty = ty_from_shape(tcx, inner)?;
+            let mutability = if *mutable { ty::Mutability::Mut } else { ty::Mutability::Not };
+            Ty::new_ptr(tcx, inner_ty, mutability)
+        }
+        TyShape::Slice(inner) => {
+            let inner_ty = ty_from_shape(tcx, inner)?;
+            Ty::new_slice(tcx, inner_ty)
+        }
+        TyShape::FnPtr(elems) => {
+            let tys: Vec<Ty<'tcx>> =
+                elems.iter().map(|e| ty_from_shape(tcx, e)).collect::<Option<_>>()?;
+            let sig = ty::FnSig {
+                inputs_and_output: tcx.mk_type_list_from_iter(tys.iter().copied()),
+                c_variadic: false,
+                safety: rustc_hir::Safety::Safe,
+                abi: rustc_abi::ExternAbi::Rust,
+            };
+            Ty::new_fn_ptr(tcx, ty::Binder::dummy(sig))
+        }
+        TyShape::Dyn(trait_hash, genarg_shapes) => {
+            let trait_did = safe_def_path_hash_to_def_id(tcx, DefPathHash::from(*trait_hash))?;
+            let genarg_tys: Vec<Ty<'tcx>> =
+                genarg_shapes.iter().map(|s| ty_from_shape(tcx, s)).collect::<Option<_>>()?;
+            let trait_ref = ty::TraitRef::new(tcx, trait_did, genarg_tys);
+            let predicate = ty::Binder::dummy(ty::ExistentialPredicate::Trait(
+                ty::ExistentialTraitRef::erase_self_ty(tcx, trait_ref),
+            ));
+            let predicates = tcx.mk_poly_existential_predicates(&[predicate]);
+            Ty::new_dynamic(tcx, predicates, tcx.lifetimes.re_erased)
+        }
+    })
+}
+
+/// Mirrors hash_ty's own match arms exactly, but produces the TyShape
+/// a given hash was computed from, rather than the hash itself. Called
+/// only at the top level (see to_genargs_hashes below), not
+/// recursively alongside every nested hash_ty call - a TyShape already
+/// embeds its own nested structure directly, so there's no need for a
+/// separate registry entry per sub-component.
+fn ty_to_shape<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<TyShape> {
+    Some(match ty.kind() {
+        ty::Adt(..) => return None,
+        ty::Bool => TyShape::Primitive("prim:bool".to_string()),
+        ty::Char => TyShape::Primitive("prim:char".to_string()),
+        ty::Int(int_ty) => {
+            let tag = match int_ty {
+                ty::IntTy::Isize => "prim:isize",
+                ty::IntTy::I8 => "prim:i8",
+                ty::IntTy::I16 => "prim:i16",
+                ty::IntTy::I32 => "prim:i32",
+                ty::IntTy::I64 => "prim:i64",
+                ty::IntTy::I128 => "prim:i128",
+            };
+            TyShape::Primitive(tag.to_string())
+        }
+        ty::Uint(uint_ty) => {
+            let tag = match uint_ty {
+                ty::UintTy::Usize => "prim:usize",
+                ty::UintTy::U8 => "prim:u8",
+                ty::UintTy::U16 => "prim:u16",
+                ty::UintTy::U32 => "prim:u32",
+                ty::UintTy::U64 => "prim:u64",
+                ty::UintTy::U128 => "prim:u128",
+            };
+            TyShape::Primitive(tag.to_string())
+        }
+        ty::Float(float_ty) => {
+            let tag = match float_ty {
+                ty::FloatTy::F16 => "prim:f16",
+                ty::FloatTy::F32 => "prim:f32",
+                ty::FloatTy::F64 => "prim:f64",
+                ty::FloatTy::F128 => "prim:f128",
+            };
+            TyShape::Primitive(tag.to_string())
+        }
+        ty::Tuple(elems) => {
+            let shapes: Option<Vec<TyShape>> =
+                elems.iter().map(|t| ty_to_shape(tcx, t)).collect();
+            TyShape::Tuple(shapes?)
+        }
+        ty::Ref(_region, inner_ty, mutability) => {
+            TyShape::Ref(*mutability == ty::Mutability::Mut, Box::new(ty_to_shape(tcx, *inner_ty)?))
+        }
+        ty::RawPtr(inner_ty, mutability) => TyShape::RawPtr(
+            *mutability == ty::Mutability::Mut,
+            Box::new(ty_to_shape(tcx, *inner_ty)?),
+        ),
+        ty::Slice(inner_ty) => TyShape::Slice(Box::new(ty_to_shape(tcx, *inner_ty)?)),
+        ty::FnPtr(sig_tys, _fn_header) => {
+            let fn_sig_tys = sig_tys.skip_binder();
+            let shapes: Option<Vec<TyShape>> =
+                fn_sig_tys.inputs_and_output.iter().map(|t| ty_to_shape(tcx, t)).collect();
+            TyShape::FnPtr(shapes?)
+        }
+        ty::Dynamic(predicates, _region) => {
+            let [binder] = predicates.as_slice() else {
+                return None;
+            };
+            let ty::ExistentialPredicate::Trait(trait_ref) = binder.skip_binder() else {
+                return None;
+            };
+            let trait_hash = SerializableDefPathHash::from(tcx.def_path_hash(trait_ref.def_id));
+            let genarg_shapes: Option<Vec<TyShape>> = trait_ref
+                .args
+                .into_iter()
+                .map(|arg| {
+                    let ty::GenericArgKind::Type(t) = arg.kind() else {
+                        return None;
+                    };
+                    ty_to_shape(tcx, t)
+                })
+                .collect();
+            TyShape::Dyn(trait_hash, genarg_shapes?)
+        }
+        _ => return None,
+    })
+}
+
 fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
     Some(match ty.kind() {
         ty::Adt(adt_def, sub_genargs) => {
@@ -486,7 +722,11 @@ fn to_genargs_hashes<'tcx>(
         let ty::GenericArgKind::Type(ty) = arg.kind() else {
             return None;
         };
-        hashes.push(hash_ty(tcx, ty)?);
+        let hash = hash_ty(tcx, ty)?;
+        if let Some(shape) = ty_to_shape(tcx, ty) {
+            record_shape(hash, shape);
+        }
+        hashes.push(hash);
     }
     Some(hashes)
 }
@@ -1016,8 +1256,20 @@ fn fn_op<'tcx>(
             let tys: Vec<Ty<'tcx>> = match hashes
                 .iter()
                 .map(|h| {
-                    let did = safe_def_path_hash_to_def_id(tcx, *h).ok_or(())?;
-                    Ok(tcx.type_of(did).instantiate_identity())
+                    if let Some(did) = safe_def_path_hash_to_def_id(tcx, *h) {
+                        return Ok(tcx.type_of(did).instantiate_identity());
+                    }
+                    // Not a real DefId hash at all - safe_def_path_hash_to_def_id
+                    // can never resolve one of these (see TyShape's own doc
+                    // comment). Rebuild it directly from its own recorded
+                    // shape instead, if this process has one - either because
+                    // it hashed this same type itself, or because it read the
+                    // shape in from the store (see load_shared_store).
+                    let shape = shape_registry().lock().unwrap().get(h).cloned();
+                    match shape.and_then(|s| ty_from_shape(tcx, &s)) {
+                        Some(ty) => Ok(ty),
+                        None => Err(()),
+                    }
                 })
                 .collect::<Result<Vec<_>, ()>>()
             {
@@ -1069,14 +1321,18 @@ fn fn_op<'tcx>(
     let raw_self_ty = if tcx.def_kind(parent_did) == DefKind::Trait {
         match &self_hashes {
             Some(hashes) if !hashes.is_empty() => {
-                let self_did = match safe_def_path_hash_to_def_id(tcx, hashes[0]) {
-                    Some(did) => did,
-                    None => {
-                        debug!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
-                        return Err(());
+                if let Some(did) = safe_def_path_hash_to_def_id(tcx, hashes[0]) {
+                    tcx.type_of(did).instantiate_identity()
+                } else {
+                    let shape = shape_registry().lock().unwrap().get(&hashes[0]).cloned();
+                    match shape.and_then(|s| ty_from_shape(tcx, &s)) {
+                        Some(ty) => ty,
+                        None => {
+                            debug!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                            return Err(());
+                        }
                     }
-                };
-                tcx.type_of(self_did).instantiate_identity()
+                }
             }
             _ => {
                 debug!("[verifopt debug][fn_op] FAILED: parent is a Trait but self_hashes is None/empty: target_did={:?} self_hashes={:?}", target_did, self_hashes);
