@@ -405,7 +405,12 @@ pub(super) enum TyShape {
     Ref(bool /* mutable */, Box<TyShape>),
     RawPtr(bool /* mutable */, Box<TyShape>),
     Slice(Box<TyShape>),
-    FnPtr(Vec<TyShape>) /* inputs_and_output, in order */,
+    FnPtr {
+        inputs_and_output: Vec<TyShape>,
+        abi: String,
+        safe: bool,
+        c_variadic: bool,
+    },
     Dyn(SerializableDefPathHash /* trait DefId hash */, Vec<TyShape>),
 }
 
@@ -477,14 +482,17 @@ fn ty_from_shape<'tcx>(tcx: TyCtxt<'tcx>, shape: &TyShape) -> Option<Ty<'tcx>> {
             let inner_ty = ty_from_shape(tcx, inner)?;
             Ty::new_slice(tcx, inner_ty)
         }
-        TyShape::FnPtr(elems) => {
-            let tys: Vec<Ty<'tcx>> =
-                elems.iter().map(|e| ty_from_shape(tcx, e)).collect::<Option<_>>()?;
+        TyShape::FnPtr { inputs_and_output, abi, safe, c_variadic } => {
+            let tys: Vec<Ty<'tcx>> = inputs_and_output
+                .iter()
+                .map(|e| ty_from_shape(tcx, e))
+                .collect::<Option<_>>()?;
+            let parsed_abi = abi.parse::<rustc_abi::ExternAbi>().ok()?;
             let sig = ty::FnSig {
                 inputs_and_output: tcx.mk_type_list_from_iter(tys.iter().copied()),
-                c_variadic: false,
-                safety: rustc_hir::Safety::Safe,
-                abi: rustc_abi::ExternAbi::Rust,
+                c_variadic: *c_variadic,
+                safety: if *safe { rustc_hir::Safety::Safe } else { rustc_hir::Safety::Unsafe },
+                abi: parsed_abi,
             };
             Ty::new_fn_ptr(tcx, ty::Binder::dummy(sig))
         }
@@ -557,11 +565,16 @@ fn ty_to_shape<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<TyShape> {
             Box::new(ty_to_shape(tcx, *inner_ty)?),
         ),
         ty::Slice(inner_ty) => TyShape::Slice(Box::new(ty_to_shape(tcx, *inner_ty)?)),
-        ty::FnPtr(sig_tys, _fn_header) => {
+        ty::FnPtr(sig_tys, fn_header) => {
             let fn_sig_tys = sig_tys.skip_binder();
             let shapes: Option<Vec<TyShape>> =
                 fn_sig_tys.inputs_and_output.iter().map(|t| ty_to_shape(tcx, t)).collect();
-            TyShape::FnPtr(shapes?)
+            TyShape::FnPtr {
+                inputs_and_output: shapes?,
+                abi: fn_header.abi.name().to_string(),
+                safe: fn_header.safety.is_safe(),
+                c_variadic: fn_header.c_variadic,
+            }
         }
         ty::Dynamic(predicates, _region) => {
             let [binder] = predicates.as_slice() else {
@@ -654,14 +667,21 @@ fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
         ty::Slice(inner_ty) => {
             combine_hashes("prim:slice", &[hash_ty(tcx, *inner_ty)?])
         }
-        ty::FnPtr(sig_tys, _fn_header) => {
+        ty::FnPtr(sig_tys, fn_header) => {
             let fn_sig_tys = sig_tys.skip_binder();
-            let elem_hashes: Option<Vec<DefPathHash>> = fn_sig_tys
+            let mut elem_hashes: Vec<DefPathHash> = fn_sig_tys
                 .inputs_and_output
                 .iter()
                 .map(|t| hash_ty(tcx, t))
-                .collect();
-            combine_hashes("prim:fnptr", &elem_hashes?)
+                .collect::<Option<_>>()?;
+            let header_tag = format!(
+                "prim:fnptr:header:{}:{}:{}",
+                fn_header.abi.name(),
+                fn_header.safety.is_safe(),
+                fn_header.c_variadic,
+            );
+            elem_hashes.push(primitive_ty_sentinel(&header_tag));
+            combine_hashes("prim:fnptr", &elem_hashes)
         }
         // Only the common case is handled: exactly one predicate, and
         // that predicate is a plain trait bound (Send/Sync-style
