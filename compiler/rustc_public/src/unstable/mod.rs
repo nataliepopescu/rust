@@ -35,6 +35,8 @@ pub trait InternalCx<'tcx>: Copy + Clone {
 
     fn mk_pat(self, v: ty::PatternKind<'tcx>) -> ty::Pattern<'tcx>;
 
+    fn mk_patterns(self, v: &[ty::Pattern<'tcx>]) -> &'tcx List<ty::Pattern<'tcx>>;
+
     fn mk_poly_existential_predicates(
         self,
         eps: &[ty::PolyExistentialPredicate<'tcx>],

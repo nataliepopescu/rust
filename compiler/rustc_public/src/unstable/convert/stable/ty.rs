@@ -487,8 +487,10 @@ impl<'tcx> Stable<'tcx> for ty::Pattern<'tcx> {
                 end: Some(end.stable(tables, cx)),
                 include_end: true,
             },
-            ty::PatternKind::NotNull => todo!(),
-            ty::PatternKind::Or(_) => todo!(),
+            ty::PatternKind::NotNull => crate::ty::Pattern::NotNull,
+            ty::PatternKind::Or(pats) => {
+                crate::ty::Pattern::Or(pats.iter().map(|pat| pat.stable(tables, cx)).collect())
+            }
         }
     }
 }

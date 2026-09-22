@@ -110,6 +110,10 @@ impl Ty {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Pattern {
     Range { start: Option<TyConst>, end: Option<TyConst>, include_end: bool },
+    /// A disjunction of patterns, e.g. `u32 is 1..3 | 5..8`.
+    Or(Vec<Pattern>),
+    /// The pointer is non-null, e.g. `*const T is !null` (used by `NonNull`).
+    NotNull,
 }
 
 /// Represents a constant in the type system

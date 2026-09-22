@@ -128,6 +128,11 @@ impl RustcInternal for Pattern {
                 start: start.as_ref().unwrap().internal(tables, tcx),
                 end: end.as_ref().unwrap().internal(tables, tcx),
             },
+            Pattern::Or(pats) => {
+                let pats: Vec<_> = pats.iter().map(|pat| pat.internal(tables, tcx)).collect();
+                rustc_ty::PatternKind::Or(tcx.mk_patterns(&pats))
+            }
+            Pattern::NotNull => rustc_ty::PatternKind::NotNull,
         })
     }
 }

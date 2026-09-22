@@ -60,6 +60,10 @@ impl<'tcx> InternalCx<'tcx> for TyCtxt<'tcx> {
         TyCtxt::mk_pat(self, v)
     }
 
+    fn mk_patterns(self, v: &[ty::Pattern<'tcx>]) -> &'tcx List<ty::Pattern<'tcx>> {
+        TyCtxt::mk_patterns(self, v)
+    }
+
     fn mk_poly_existential_predicates(
         self,
         eps: &[ty::PolyExistentialPredicate<'tcx>],

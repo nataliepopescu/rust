@@ -17,8 +17,10 @@ use rustc_middle::mir::pretty::MirWriter;
 use rustc_middle::ty;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::{
-    AssocKind, FnDef, GenericArg, Instance, List, Ty, TyCtxt, TypingEnv, VtblEntry,
+    AssocKind, FnDef, GenericArg, Instance, InstanceKind, List, Ty, TyCtxt, TypingEnv, VtblEntry,
 };
+use rustc_middle::mir::{BorrowKind, MutBorrowKind};
+use rustc_span::def_id::DefId;
 use rustc_span::Span;
 
 use std::fs::{File, OpenOptions};
@@ -875,9 +877,17 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
             )
         };
 
+        // Decide up front whether the receiver can be narrowed at all, so an
+        // unsupported receiver bails out before any statements are emitted.
+        let recv_ty = args[0].node.ty(&local_decls, tcx);
+        let Some(recv_kind) = RecvKind::of(recv_ty) else {
+            debug!("[verifopt debug][apply_edits] skipping bb {:?}: unsupported receiver type {:?}", bb, recv_ty);
+            continue;
+        };
+
         match edit {
             Edit::Single(hash, self_hash) => {
-                let (fnc, self_ty) = match fn_op(tcx, hash, self_hash, gen_args, span) {
+                let (fnc, self_ty) = match fn_op(tcx, defid, hash, self_hash, gen_args, span) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
@@ -887,6 +897,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                     &mut body,
                     source_info,
                     args[0].node.clone(),
+                    recv_kind,
                     self_ty,
                     span,
                 );
@@ -1038,7 +1049,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                 let n = hashes.len();
 
                 for (i, (hash, self_hash)) in hashes.iter().enumerate() {
-                    let (fnc, self_ty) = match fn_op(tcx, *hash, self_hash.clone(), gen_args, span)
+                    let (fnc, self_ty) = match fn_op(tcx, defid, *hash, self_hash.clone(), gen_args, span)
                     {
                         Ok(v) => v,
                         Err(_) => continue,
@@ -1049,6 +1060,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                         &mut body,
                         source_info,
                         args[0].node.clone(),
+                        recv_kind,
                         self_ty,
                         span,
                     );
@@ -1174,7 +1186,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
 
                 for (_, _, tag, impl_hash, self_hash) in &sites {
                     let (fnc, self_ty) =
-                        match fn_op(tcx, *impl_hash, self_hash.clone(), gen_args, span) {
+                        match fn_op(tcx, defid, *impl_hash, self_hash.clone(), gen_args, span) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
@@ -1183,6 +1195,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                         &mut body,
                         source_info,
                         args[0].node.clone(),
+                        recv_kind,
                         self_ty,
                         span,
                     );
@@ -1258,6 +1271,9 @@ fn safe_def_path_hash_to_def_id(tcx: TyCtxt<'_>, hash: DefPathHash) -> Option<ru
 
 fn fn_op<'tcx>(
     tcx: TyCtxt<'tcx>,
+    // The DefId of the original (virtual) callee, e.g. FnMut::call_mut.
+    // Needed for closure-like targets, whose DefId is not callable itself.
+    orig_callee: DefId,
     hash: DefPathHash,
     self_hashes: Option<Vec<DefPathHash>>,
     gen_args: &'tcx List<GenericArg<'tcx>>,
@@ -1328,24 +1344,15 @@ fn fn_op<'tcx>(
             }
         };
 
-    let fn_ty = instance.ty(tcx, TypingEnv::fully_monomorphized());
-    let new_const = Const::zero_sized(fn_ty);
-
-    let op = Operand::Constant(Box::new(ConstOperand {
-        span: span,
-        user_ty: None,
-        const_: new_const,
-    }));
-
     let raw_self_ty = if tcx.is_closure_like(target_did) {
         // A closure's own tcx.parent() is just whatever function it's
         // defined inside - never a genuine self-type provider the way
         // an impl block or trait is - so neither branch below applies.
-        // instance.args here are the closure's own, already-resolved
-        // generic args (self_hashes resolved them, possibly via
-        // ty_from_shape) - Instance::try_resolve above already
-        // succeeded with them, so they're known-compatible.
-        Ty::new_closure(tcx, target_did, instance.args)
+        // For a closure-like DefId, type_of *is* the closure / coroutine /
+        // coroutine-closure type itself (instantiated with the closure's own,
+        // already-resolved generic args), which is exactly the Self type we
+        // want. This also covers coroutines, which Ty::new_closure did not.
+        tcx.type_of(target_did).instantiate(tcx, instance.args)
     } else {
         let parent_did = tcx.parent(target_did);
         if tcx.def_kind(parent_did) == DefKind::Trait {
@@ -1382,8 +1389,85 @@ fn fn_op<'tcx>(
         }
     };
 
+    // Build the callee operand. It must be a zero-sized FnDef constant.
+    let fn_ty = if tcx.is_closure_like(target_did) {
+        // instance.ty() for a closure-like instance is the closure type
+        // itself (non-ZST whenever it captures anything), not a function
+        // type. Emitting Const::zero_sized of it is what tripped
+        // `assertion failed: layout.is_zst()` in OperandRef::zero_sized.
+        //
+        // Instead, call the original trait method (FnMut::call_mut etc.)
+        // with Self replaced by the concrete closure type:
+        //   <{closure} as FnMut<Args>>::call_mut
+        // Codegen resolves that to the closure body (or a ClosureOnceShim
+        // for call_once on an Fn/FnMut closure), i.e. the same thing the
+        // vtable slot points at.
+        if tcx.trait_of_assoc(orig_callee).is_none() || gen_args.is_empty() {
+            debug!("[verifopt debug][fn_op] FAILED: closure-like target but original callee is not a trait method: target_did={:?} orig_callee={:?}", target_did, orig_callee);
+            return Err(());
+        }
+        let callee_args = tcx.mk_args_from_iter(
+            std::iter::once(GenericArg::from(self_ty)).chain(gen_args.iter().skip(1)),
+        );
+        match Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), orig_callee, callee_args) {
+            Ok(Some(resolved)) => {
+                let points_at_target = match resolved.def {
+                    InstanceKind::ClosureOnceShim { .. } => true,
+                    _ => resolved.def_id() == target_did,
+                };
+                if !points_at_target {
+                    debug!("[verifopt debug][fn_op] FAILED: <closure as Trait>::method resolved to an unexpected instance: target_did={:?} resolved={:?}", target_did, resolved);
+                    return Err(());
+                }
+            }
+            other => {
+                debug!("[verifopt debug][fn_op] FAILED at closure callee resolution: orig_callee={:?} callee_args={:?} result={:?}", orig_callee, callee_args, other);
+                return Err(());
+            }
+        }
+        Ty::new_fn_def(tcx, orig_callee, callee_args)
+    } else {
+        instance.ty(tcx, TypingEnv::fully_monomorphized())
+    };
+
+    // Defensive: never emit a zero-sized constant whose type is not a ZST
+    // function item, whatever the target turns out to be.
+    if !matches!(fn_ty.kind(), FnDef(..)) {
+        debug!("[verifopt debug][fn_op] FAILED: callee type is not an FnDef: target_did={:?} fn_ty={:?}", target_did, fn_ty);
+        return Err(());
+    }
+
+    let op = Operand::Constant(Box::new(ConstOperand {
+        span: span,
+        user_ty: None,
+        const_: Const::zero_sized(fn_ty),
+    }));
+
     debug!("[verifopt debug][fn_op] SUCCESS: target_did={:?} self_ty={:?}", target_did, self_ty);
     Ok((op, self_ty))
+}
+
+/// How the original dyn receiver was passed. The narrowed receiver must
+/// keep the same pointer kind and mutability, e.g. FnMut::call_mut takes
+/// `&mut Self`, so narrowing `&mut dyn FnMut` to `&{closure}` would be
+/// ill-typed MIR.
+#[derive(Clone, Copy, Debug)]
+enum RecvKind {
+    Ref(Mutability),
+    RawPtr(Mutability),
+}
+
+impl RecvKind {
+    /// Only `&dyn`, `&mut dyn`, `*const dyn` and `*mut dyn` receivers can be
+    /// narrowed with a pointer cast. Anything else (Box<Self>, Rc<Self>,
+    /// Pin<&mut Self>, ...) is not handled, and the call is left as-is.
+    fn of(recv_ty: Ty<'_>) -> Option<RecvKind> {
+        match recv_ty.kind() {
+            ty::Ref(_, _, m) => Some(RecvKind::Ref(*m)),
+            ty::RawPtr(_, m) => Some(RecvKind::RawPtr(*m)),
+            _ => None,
+        }
+    }
 }
 
 fn narrow_dyn<'tcx>(
@@ -1391,11 +1475,14 @@ fn narrow_dyn<'tcx>(
     body: &mut Body<'tcx>,
     si: SourceInfo,
     recv: Operand<'tcx>,
+    recv_kind: RecvKind,
     self_ty: Ty<'tcx>,
     span: Span,
 ) -> (Place<'tcx>, Vec<Statement<'tcx>>) {
-    let ptr_ty = Ty::new_ptr(tcx, self_ty, Mutability::Not);
-    let ref_ty = Ty::new_ref(tcx, tcx.lifetimes.re_erased, self_ty, Mutability::Not);
+    let mutbl = match recv_kind {
+        RecvKind::Ref(m) | RecvKind::RawPtr(m) => m,
+    };
+    let ptr_ty = Ty::new_ptr(tcx, self_ty, mutbl);
 
     let mut stmts = Vec::new();
 
@@ -1408,9 +1495,20 @@ fn narrow_dyn<'tcx>(
         ))),
     ));
 
+    // Raw-pointer receivers are passed as the (now thin) raw pointer.
+    if let RecvKind::RawPtr(_) = recv_kind {
+        return (thin, stmts);
+    }
+
     let deref = Place {
         local: thin.local,
         projection: tcx.mk_place_elems(&[ProjectionElem::Deref]),
+    };
+
+    let ref_ty = Ty::new_ref(tcx, tcx.lifetimes.re_erased, self_ty, mutbl);
+    let borrow_kind = match mutbl {
+        Mutability::Not => BorrowKind::Shared,
+        Mutability::Mut => BorrowKind::Mut { kind: MutBorrowKind::Default },
     };
 
     let out = Place::from(body.local_decls.push(LocalDecl::new(ref_ty, span)));
@@ -1418,11 +1516,7 @@ fn narrow_dyn<'tcx>(
         si,
         StatementKind::Assign(Box::new((
             out,
-            Rvalue::Ref(
-                tcx.lifetimes.re_erased,
-                rustc_middle::mir::BorrowKind::Shared,
-                deref,
-            ),
+            Rvalue::Ref(tcx.lifetimes.re_erased, borrow_kind, deref),
         ))),
     ));
 
