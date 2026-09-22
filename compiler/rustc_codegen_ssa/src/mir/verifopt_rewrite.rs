@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use tracing::debug;
+use tracing::{debug, trace};
 
 #[derive(Default)]
 pub(super) struct Store {
@@ -1587,7 +1587,7 @@ pub(super) fn rewrite_monomorphized<'tcx>(
     }
 
     let hash = tcx.def_path_hash(instance.def_id());
-    debug!(
+    trace!(
         "[verifopt debug][rewrite_monomorphized entry] instance={:?} def_id={:?} hash={:?} crate={:?}",
         instance,
         instance.def_id(),
