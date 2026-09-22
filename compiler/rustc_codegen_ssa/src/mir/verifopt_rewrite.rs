@@ -1337,30 +1337,41 @@ fn fn_op<'tcx>(
         const_: new_const,
     }));
 
-    let parent_did = tcx.parent(target_did);
-    let raw_self_ty = if tcx.def_kind(parent_did) == DefKind::Trait {
-        match &self_hashes {
-            Some(hashes) if !hashes.is_empty() => {
-                if let Some(did) = safe_def_path_hash_to_def_id(tcx, hashes[0]) {
-                    tcx.type_of(did).instantiate_identity()
-                } else {
-                    let shape = shape_registry().lock().unwrap().get(&hashes[0]).cloned();
-                    match shape.and_then(|s| ty_from_shape(tcx, &s)) {
-                        Some(ty) => ty,
-                        None => {
-                            debug!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
-                            return Err(());
+    let raw_self_ty = if tcx.is_closure_like(target_did) {
+        // A closure's own tcx.parent() is just whatever function it's
+        // defined inside - never a genuine self-type provider the way
+        // an impl block or trait is - so neither branch below applies.
+        // instance.args here are the closure's own, already-resolved
+        // generic args (self_hashes resolved them, possibly via
+        // ty_from_shape) - Instance::try_resolve above already
+        // succeeded with them, so they're known-compatible.
+        Ty::new_closure(tcx, target_did, instance.args)
+    } else {
+        let parent_did = tcx.parent(target_did);
+        if tcx.def_kind(parent_did) == DefKind::Trait {
+            match &self_hashes {
+                Some(hashes) if !hashes.is_empty() => {
+                    if let Some(did) = safe_def_path_hash_to_def_id(tcx, hashes[0]) {
+                        tcx.type_of(did).instantiate_identity()
+                    } else {
+                        let shape = shape_registry().lock().unwrap().get(&hashes[0]).cloned();
+                        match shape.and_then(|s| ty_from_shape(tcx, &s)) {
+                            Some(ty) => ty,
+                            None => {
+                                debug!("[verifopt debug][fn_op] FAILED at self_did resolution (trait parent branch): target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                                return Err(());
+                            }
                         }
                     }
                 }
+                _ => {
+                    debug!("[verifopt debug][fn_op] FAILED: parent is a Trait but self_hashes is None/empty: target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                    return Err(());
+                }
             }
-            _ => {
-                debug!("[verifopt debug][fn_op] FAILED: parent is a Trait but self_hashes is None/empty: target_did={:?} self_hashes={:?}", target_did, self_hashes);
-                return Err(());
-            }
+        } else {
+            tcx.type_of(parent_did).instantiate(tcx, instance.args)
         }
-    } else {
-        tcx.type_of(parent_did).instantiate(tcx, instance.args)
     };
     let self_ty = match tcx.try_normalize_erasing_regions(TypingEnv::fully_monomorphized(), raw_self_ty)
     {
