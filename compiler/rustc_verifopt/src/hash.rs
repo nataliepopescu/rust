@@ -9,7 +9,7 @@
 //! uses to rebuild the type.
 
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_middle::ty::{self, GenericArg, GenericArgKind, GenericArgsRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, GenericArg, GenericArgKind, GenericArgsRef, Region, Ty, TyCtxt};
 use rustc_span::def_id::DefPathHash;
 
 use crate::shape::{ShapeRegistry, arg_to_shape};
@@ -43,6 +43,27 @@ pub(crate) fn combine(tag: &str, hashes: &[DefPathHash]) -> DefPathHash {
 /// positions) as the `GenericArgs` it came from.
 pub fn lifetime_arg_hash() -> DefPathHash {
     sentinel("arg:lifetime")
+}
+
+/// Hashes a region. Erased and free regions are all equivalent (regions
+/// are erased throughout the pipeline) and map to [`lifetime_arg_hash`]. A
+/// region bound by a binder *inside* the type (`for<'a> fn(&'a u8)`) is
+/// hashed by its position, so that it doesn't collide with the
+/// non-higher-ranked `fn(&u8)` - those are distinct types, hence distinct
+/// instances, and must not share a store key.
+pub(crate) fn hash_region(r: Region<'_>) -> DefPathHash {
+    match r.kind() {
+        ty::ReBound(ty::BoundVarIndexKind::Bound(debruijn), br) => {
+            sentinel(&format!("region:bound:{}:{}", debruijn.as_u32(), br.var.as_u32()))
+        }
+        _ => lifetime_arg_hash(),
+    }
+}
+
+/// Wraps a hash computed under a binder with that binder's variable count
+/// (a no-op for an empty binder).
+fn under_binder(bound_vars: usize, h: DefPathHash) -> DefPathHash {
+    if bound_vars == 0 { h } else { combine("binder", &[h, sentinel(&format!("vars:{bound_vars}"))]) }
 }
 
 /// Tag for a primitive (leaf) type, shared with shape reconstruction.
@@ -111,9 +132,9 @@ pub fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
                 elems.iter().map(|t| hash_ty(tcx, t)).collect::<Option<_>>()?;
             combine("prim:tuple", &hashes)
         }
-        ty::Ref(_region, inner, mutability) => {
+        ty::Ref(region, inner, mutability) => {
             let tag = if mutability.is_mut() { "prim:ref:mut" } else { "prim:ref:not" };
-            combine(tag, &[hash_ty(tcx, *inner)?])
+            combine(tag, &[hash_ty(tcx, *inner)?, hash_region(*region)])
         }
         ty::RawPtr(inner, mutability) => {
             let tag = if mutability.is_mut() { "prim:rawptr:mut" } else { "prim:rawptr:not" };
@@ -137,25 +158,65 @@ pub fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
                 fn_header.safety.is_safe(),
                 fn_header.c_variadic,
             )));
-            combine("prim:fnptr", &hashes)
+            under_binder(sig_tys.bound_vars().len(), combine("prim:fnptr", &hashes))
         }
-        // Only a single plain trait predicate is handled (no auto traits,
-        // no associated-type bindings).
-        ty::Dynamic(predicates, _region) => {
-            let [binder] = predicates.as_slice() else {
-                return None;
-            };
-            let ty::ExistentialPredicate::Trait(trait_ref) = binder.skip_binder() else {
-                return None;
-            };
-            let mut hashes = vec![tcx.def_path_hash(trait_ref.def_id)];
-            for arg in trait_ref.args.iter() {
-                hashes.push(hash_arg(tcx, arg)?);
+        // Closures, coroutines, coroutine-closures and fn items are nominal:
+        // their DefId plus their args (for closures: the parent's args plus
+        // the kind, signature and upvar types) identify them completely.
+        ty::Closure(did, args) => hash_item(tcx, "closure", *did, args)?,
+        ty::Coroutine(did, args) => hash_item(tcx, "coroutine", *did, args)?,
+        ty::CoroutineClosure(did, args) => hash_item(tcx, "coroutine-closure", *did, args)?,
+        ty::FnDef(did, args) => hash_item(tcx, "fndef", *did, args)?,
+        ty::Foreign(did) => combine("foreign", &[tcx.def_path_hash(*did)]),
+        // Every existential predicate, in rustc's canonical order: the
+        // principal trait, projection bounds (`Item = X`) and auto traits
+        // (`+ Send`), each under its own binder.
+        ty::Dynamic(predicates, region) => {
+            let mut hashes = Vec::with_capacity(predicates.len() + 1);
+            for binder in predicates.iter() {
+                let h = match binder.skip_binder() {
+                    ty::ExistentialPredicate::Trait(trait_ref) => {
+                        let mut hs = vec![tcx.def_path_hash(trait_ref.def_id)];
+                        for arg in trait_ref.args.iter() {
+                            hs.push(hash_arg(tcx, arg)?);
+                        }
+                        combine("dyn:trait", &hs)
+                    }
+                    ty::ExistentialPredicate::Projection(proj) => {
+                        let mut hs = vec![tcx.def_path_hash(proj.def_id)];
+                        for arg in proj.args.iter() {
+                            hs.push(hash_arg(tcx, arg)?);
+                        }
+                        hs.push(match proj.term.kind() {
+                            ty::TermKind::Ty(t) => hash_ty(tcx, t)?,
+                            ty::TermKind::Const(ct) => hash_arg(tcx, ct.into())?,
+                        });
+                        combine("dyn:proj", &hs)
+                    }
+                    ty::ExistentialPredicate::AutoTrait(did) => {
+                        combine("dyn:auto", &[tcx.def_path_hash(did)])
+                    }
+                };
+                hashes.push(under_binder(binder.bound_vars().len(), h));
             }
+            hashes.push(hash_region(*region));
             combine("prim:dyn", &hashes)
         }
         _ => return None,
     })
+}
+
+fn hash_item<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    tag: &str,
+    did: rustc_span::def_id::DefId,
+    args: GenericArgsRef<'tcx>,
+) -> Option<DefPathHash> {
+    let mut hashes = vec![tcx.def_path_hash(did)];
+    for arg in args.iter() {
+        hashes.push(hash_arg(tcx, arg)?);
+    }
+    Some(combine(tag, &hashes))
 }
 
 /// Hashes one generic argument. Lifetimes all map to
@@ -163,7 +224,7 @@ pub fn hash_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<DefPathHash> {
 /// scalar.
 pub fn hash_arg<'tcx>(tcx: TyCtxt<'tcx>, arg: GenericArg<'tcx>) -> Option<DefPathHash> {
     match arg.kind() {
-        GenericArgKind::Lifetime(_) => Some(lifetime_arg_hash()),
+        GenericArgKind::Lifetime(r) => Some(hash_region(r)),
         GenericArgKind::Type(ty) => hash_ty(tcx, ty),
         GenericArgKind::Const(ct) => {
             let (ty, bits) = const_scalar(ct)?;
@@ -191,4 +252,46 @@ pub fn hash_args<'tcx>(
         hashes.push(hash);
     }
     Some(hashes)
+}
+
+/// For diagnostics: the smallest component of `args` that [`hash_arg`]
+/// can't hash, rendered with `Debug`, or `None` if every arg hashes. Lets
+/// callers report *what* made a site unhashable (e.g. a closure buried in
+/// `FilterMap<Walk, {closure}>`) rather than the whole argument list.
+pub fn explain_unhashable<'tcx>(tcx: TyCtxt<'tcx>, args: GenericArgsRef<'tcx>) -> Option<String> {
+    let mut smallest: Option<(usize, GenericArg<'tcx>)> = None;
+    for arg in args.iter() {
+        if hash_arg(tcx, arg).is_some() {
+            continue;
+        }
+        for sub in arg.walk() {
+            if hash_arg(tcx, sub).is_none() {
+                let size = sub.walk().count();
+                if smallest.is_none_or(|(s, _)| size < s) {
+                    smallest = Some((size, sub));
+                }
+            }
+        }
+    }
+    smallest.map(|(_, arg)| match arg.kind() {
+        GenericArgKind::Type(ty) => format!("{:?} ({})", ty, ty_kind_name(ty)),
+        _ => format!("{arg:?}"),
+    })
+}
+
+fn ty_kind_name(ty: Ty<'_>) -> &'static str {
+    match ty.kind() {
+        ty::Closure(..) => "closure",
+        ty::Coroutine(..) | ty::CoroutineWitness(..) => "coroutine",
+        ty::CoroutineClosure(..) => "coroutine-closure",
+        ty::FnDef(..) => "fn item",
+        ty::Dynamic(..) => "dyn",
+        ty::Array(..) => "array with unevaluated length",
+        ty::Param(_) => "type parameter",
+        ty::Alias(..) => "alias/projection",
+        ty::Pat(..) => "pattern type",
+        ty::UnsafeBinder(..) => "unsafe binder",
+        ty::Adt(..) => "adt with an unhashable const arg",
+        _ => "other",
+    }
 }

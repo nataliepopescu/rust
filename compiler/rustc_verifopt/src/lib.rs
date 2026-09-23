@@ -19,9 +19,9 @@ mod hash;
 mod shape;
 mod store;
 
-pub use hash::{hash_arg, hash_args, hash_ty, lifetime_arg_hash};
+pub use hash::{explain_unhashable, hash_arg, hash_args, hash_ty, lifetime_arg_hash};
 pub use shape::{
-    ArgShape, HashBytes, ShapeRegistry, TyShape, arg_from_hash, arg_from_shape, arg_to_shape,
+    ArgShape, HashBytes, PredShape, ShapeRegistry, TyShape, arg_from_hash, arg_from_shape, arg_to_shape,
     def_id_from_hash, ty_from_shape, ty_to_shape,
 };
 pub use store::{SiteKey, Store, TagSite, Target};
