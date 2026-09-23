@@ -3687,7 +3687,7 @@ dependencies = [
  "rustc_symbol_mangling",
  "rustc_target",
  "rustc_trait_selection",
- "serde",
+ "rustc_verifopt",
  "serde_json",
  "smallvec",
  "tempfile",
@@ -4848,6 +4848,19 @@ dependencies = [
  "quote",
  "syn 2.0.110",
  "synstructure",
+]
+
+[[package]]
+name = "rustc_verifopt"
+version = "0.0.0"
+dependencies = [
+ "rustc_abi",
+ "rustc_data_structures",
+ "rustc_hir",
+ "rustc_middle",
+ "rustc_span",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
