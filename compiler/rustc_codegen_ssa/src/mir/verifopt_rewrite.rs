@@ -9,6 +9,7 @@ use rustc_middle::mir::{
 };
 use rustc_span::def_id::{DefPathHash, LOCAL_CRATE};
 use rustc_hir::LangItem;
+use rustc_hir::attrs::Linkage;
 use rustc_hir::Safety;
 use rustc_hir::def::DefKind;
 use rustc_middle::mir::pretty::MirWriter;
@@ -18,6 +19,7 @@ use rustc_middle::ty::{
     AssocKind, FnDef, GenericArg, Instance, InstanceKind, List, Ty, TyCtxt, TypingEnv, VtblEntry,
 };
 use rustc_middle::mir::{BorrowKind, MutBorrowKind};
+use rustc_middle::mir::mono::{CodegenUnit, MonoItem};
 use rustc_span::def_id::DefId;
 use rustc_span::Span;
 
@@ -226,10 +228,17 @@ fn compute_edits<'tcx>(
         .collect()
 }
 
-fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, Edit)>) -> Body<'tcx> {
+fn apply_edits<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+    default: Body<'tcx>,
+    edits: Vec<(usize, Edit)>,
+) -> Body<'tcx> {
     if edits.is_empty() {
         return default;
     }
+
+    let linkable = Linkable::new(tcx, instance);
 
     let mut body = default.clone();
 
@@ -282,6 +291,29 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
             debug!("[verifopt debug][apply_edits] skipping bb {:?}: unsupported receiver type {:?}", bb, recv_ty);
             continue;
         };
+
+        // Also up front: every function this edit would reference must be
+        // linkable from here (see Linkable). If any isn't - or any target
+        // can't be resolved at all - leave the whole site's dyn call alone;
+        // that's always correct. (This also means a Pointers/Tagged arm can
+        // no longer fail fn_op halfway through building the site.)
+        let site_targets: Vec<(DefPathHash, Option<Vec<DefPathHash>>)> = match &edit {
+            Edit::Single(h, s) => vec![(*h, s.clone())],
+            Edit::Pointers(ts) => ts.clone(),
+            Edit::Tagged(sites) => sites.iter().map(|(_, _, _, h, s)| (*h, s.clone())).collect(),
+        };
+        let compares_fn_ptrs = matches!(edit, Edit::Pointers(_));
+        if let Err(why) =
+            linkable.check_site(defid, gen_args, span, &site_targets, compares_fn_ptrs)
+        {
+            debug!(
+                "[verifopt debug][apply_edits] leaving {:?} bb{:?} unrewritten: {}",
+                instance.def_id(),
+                bb,
+                why
+            );
+            continue;
+        }
 
         match edit {
             Edit::Single(hash, self_hash) => {
@@ -673,6 +705,122 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
 /// gracefully (leaving the original, vtable-based dyn call in place)
 /// rather than crashing the whole compilation.
 
+/// Which functions code in the caller's codegen unit(s) can reference.
+///
+/// The rewrite adds direct calls (and, for Pointers, function-pointer
+/// references) that the monomorphization collector never saw - it ran on the
+/// original MIR, before this rewrite. So a target the store names can be:
+///
+/// - never instantiated at all: e.g. a spurious candidate like
+///   `<Box<Counter> as Iterator>::next` when no `Box<Counter>` is ever turned
+///   into a trait object. Referencing it is an "undefined reference" at link
+///   time (seen in `box_dyn_iter`'s debug build).
+/// - instantiated only in another codegen unit, with internal linkage:
+///   partitioning internalizes items whose collected uses are all in one CGU,
+///   and gives inline/LocalCopy items copies only in the CGUs that need them.
+/// - in an upstream crate, but not exported.
+///
+/// In all these cases the whole site keeps its dyn call. Dropping just the
+/// arm would only be sound if the target could never be the runtime callee,
+/// which a crate-local check can't establish: an upstream crate's vtables can
+/// point at functions this crate never compiles.
+struct Linkable<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    all_cgus: &'tcx [CodegenUnit<'tcx>],
+    /// Every CGU the caller is codegenned in (several if it's a LocalCopy
+    /// item); the rewritten body is emitted into each of them.
+    caller_cgus: Vec<&'tcx CodegenUnit<'tcx>>,
+}
+
+impl<'tcx> Linkable<'tcx> {
+    fn new(tcx: TyCtxt<'tcx>, caller: Instance<'tcx>) -> Self {
+        let all_cgus = tcx.collect_and_partition_mono_items(()).codegen_units;
+        let caller_item = MonoItem::Fn(caller);
+        let caller_cgus =
+            all_cgus.iter().filter(|cgu| cgu.items().contains_key(&caller_item)).collect();
+        Linkable { tcx, all_cgus, caller_cgus }
+    }
+
+    fn can_reference(&self, target: Instance<'tcx>) -> bool {
+        let item = MonoItem::Fn(target);
+
+        // Instantiated somewhere in this crate with a linkage other CGUs can
+        // see (External, with Default or Hidden visibility - same link unit).
+        if self
+            .all_cgus
+            .iter()
+            .any(|cgu| cgu.items().get(&item).is_some_and(|d| d.linkage != Linkage::Internal))
+        {
+            return true;
+        }
+
+        // Only internal copies (or none): fine iff every CGU the caller is
+        // emitted into has its own copy.
+        if !self.caller_cgus.is_empty()
+            && self.caller_cgus.iter().all(|cgu| cgu.items().contains_key(&item))
+        {
+            return true;
+        }
+
+        // Provided by an upstream crate: an exported non-generic item, or a
+        // shared generic instance (share-generics).
+        let did = target.def_id();
+        if did.is_local() {
+            return false;
+        }
+        if target.args.non_erasable_generics().next().is_some() {
+            target.upstream_monomorphization(self.tcx).is_some()
+        } else {
+            matches!(target.def, InstanceKind::Item(_)) && self.tcx.is_reachable_non_generic(did)
+        }
+    }
+
+    /// Resolves every target of a site the way codegen will, and checks each
+    /// function it would reference: the callee, and for Pointers also the
+    /// function pointer it compares against the vtable slot (which can be a
+    /// different instance, e.g. a ReifyShim).
+    fn check_site(
+        &self,
+        orig_callee: DefId,
+        gen_args: &'tcx List<GenericArg<'tcx>>,
+        span: Span,
+        targets: &[(DefPathHash, Option<Vec<DefPathHash>>)],
+        compares_fn_ptrs: bool,
+    ) -> Result<(), String> {
+        let env = TypingEnv::fully_monomorphized();
+        for (hash, self_hashes) in targets {
+            let Ok((fnc, _)) =
+                fn_op(self.tcx, orig_callee, *hash, self_hashes.clone(), gen_args, span)
+            else {
+                return Err(format!("target {hash:?} could not be resolved"));
+            };
+            let Operand::Constant(c) = &fnc else {
+                return Err(format!("target {hash:?} is not a constant fn operand"));
+            };
+            let ty::FnDef(did, args) = *c.const_.ty().kind() else {
+                return Err(format!("target {hash:?} is not an FnDef"));
+            };
+
+            let callee = match Instance::try_resolve(self.tcx, env, did, args) {
+                Ok(Some(i)) => i,
+                _ => return Err(format!("target {did:?} does not resolve to an instance")),
+            };
+            if !self.can_reference(callee) {
+                return Err(format!("target {callee:?} is not linkable from here"));
+            }
+
+            if compares_fn_ptrs {
+                match Instance::resolve_for_fn_ptr(self.tcx, env, did, args) {
+                    Some(fp) if self.can_reference(fp) => {}
+                    Some(fp) => return Err(format!("fn pointer {fp:?} is not linkable from here")),
+                    None => return Err(format!("target {did:?} has no fn-pointer instance")),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn fn_op<'tcx>(
     tcx: TyCtxt<'tcx>,
     // The DefId of the original (virtual) callee, e.g. FnMut::call_mut.
@@ -1021,5 +1169,5 @@ pub(super) fn rewrite_monomorphized<'tcx>(
             instance.def_id(),
         );
     }
-    apply_edits(tcx, monomorphized_mir, edits)
+    apply_edits(tcx, instance, monomorphized_mir, edits)
 }
