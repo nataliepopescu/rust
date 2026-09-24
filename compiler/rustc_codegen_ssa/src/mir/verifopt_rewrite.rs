@@ -442,7 +442,11 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                     ))),
                 ));
 
-                let orig = bbs[bb].terminator().clone();
+                let is_cleanup = bbs[bb].is_cleanup;
+                let mut orig = bbs[bb].terminator().clone();
+                if let TerminatorKind::Call { target: t, .. } = &mut orig.kind {
+                    *t = call_guard(&mut bbs, *t, source_info, is_cleanup);
+                }
                 let mut fallback = bbs.push(BasicBlockData::new_stmts(vec![], Some(orig), false));
                 let n = hashes.len();
 
@@ -465,6 +469,8 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                     let mut new_args = args.clone();
                     new_args[0].node = Operand::Move(recv);
 
+                    // Each arm's call needs its own return block (see call_guard).
+                    let arm_target = call_guard(&mut bbs, target, source_info, is_cleanup);
                     let call_bb = bbs.push(BasicBlockData::new_stmts(
                         new_stmts,
                         Some(Terminator {
@@ -473,7 +479,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                                 func: fnc.clone(),
                                 args: new_args,
                                 destination: dest,
-                                target: target,
+                                target: arm_target,
                                 unwind: unwind,
                                 call_source: call_source,
                                 fn_span: span,
@@ -577,7 +583,11 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                     );
                 }
 
-                let orig = bbs[bb].terminator().clone();
+                let is_cleanup = bbs[bb].is_cleanup;
+                let mut orig = bbs[bb].terminator().clone();
+                if let TerminatorKind::Call { target: t, .. } = &mut orig.kind {
+                    *t = call_guard(&mut bbs, *t, source_info, is_cleanup);
+                }
                 let fallback = bbs.push(BasicBlockData::new_stmts(vec![], Some(orig), false));
 
                 let mut arms = Vec::new();
@@ -601,6 +611,8 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                     let mut new_args = args.clone();
                     new_args[0].node = Operand::Move(recv);
 
+                    // Each arm's call needs its own return block (see call_guard).
+                    let arm_target = call_guard(&mut bbs, target, source_info, is_cleanup);
                     let cb = bbs.push(BasicBlockData::new_stmts(
                         stmts,
                         Some(Terminator {
@@ -609,7 +621,7 @@ fn apply_edits<'tcx>(tcx: TyCtxt<'tcx>, default: Body<'tcx>, edits: Vec<(usize, 
                                 func: fnc,
                                 args: new_args,
                                 destination: dest,
-                                target,
+                                target: arm_target,
                                 unwind,
                                 call_source,
                                 fn_span: span,
@@ -841,6 +853,36 @@ impl RecvKind {
             _ => None,
         }
     }
+}
+
+/// Returns a fresh block that just jumps to `target`, for use as the return
+/// block of a call the rewrite creates.
+///
+/// Codegen stores a call's return value at the *start of its return block*
+/// (block.rs: `do_call` -> `store_return`, emitted into `target`'s block for
+/// an `invoke`). That is only valid because optimized MIR guarantees no
+/// call's return edge is shared: AddCallGuards splits any critical call edge
+/// with an empty `goto` block, exactly like this one. A rewrite that fans one
+/// dispatch out into several calls - the Pointers/Tagged arms plus the
+/// fallback - all returning to the original target breaks that invariant:
+/// every call's store lands at the top of the shared block, each using a
+/// value from a different predecessor. That's invalid IR (the LLVM verifier,
+/// off in release builds, would reject it); in practice the stores collapse
+/// to the last one codegen emitted, silently dropping the other calls'
+/// results - seen as box_dyn_iter's `for` loop ending after one `next`,
+/// whose `Some(1)` never reached the loop.
+fn call_guard<'tcx>(
+    bbs: &mut IndexVec<BasicBlock, BasicBlockData<'tcx>>,
+    target: Option<BasicBlock>,
+    source_info: SourceInfo,
+    is_cleanup: bool,
+) -> Option<BasicBlock> {
+    let target = target?;
+    Some(bbs.push(BasicBlockData::new_stmts(
+        vec![],
+        Some(Terminator { source_info, kind: TerminatorKind::Goto { target } }),
+        is_cleanup,
+    )))
 }
 
 fn narrow_dyn<'tcx>(
