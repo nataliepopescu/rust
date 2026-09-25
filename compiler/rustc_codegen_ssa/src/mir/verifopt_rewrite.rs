@@ -170,14 +170,37 @@ fn log_edit_kind(kind: &str) {
     let _ = file.write_all(format!("{kind}\n").as_bytes());
 }
 
-fn dump_body<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, label: &str) {
+fn dump_body<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, body: &Body<'tcx>, label: &str) {
     let mut buf = Vec::new();
 
     let writer = MirWriter::new(tcx);
     let _ = ty::print::with_no_trimmed_paths!(writer.write_mir_fn(body, &mut buf));
 
+    // Where this rewrite applied. The `fn` line MirWriter prints uses the
+    // function's short name, so e.g. a `fmt` in the top-level crate and one
+    // in a dependency were indistinguishable in a combined dump. Cargo sets
+    // CARGO_PKG_NAME/CARGO_PKG_VERSION for every rustc it runs (dependencies
+    // included); outside cargo, fall back to the crate name alone. The
+    // instance line adds the generic args, which tell apart different
+    // monomorphizations of one generic function (possibly in several crates).
+    // The `######### MIR ... #########` line itself is unchanged, since
+    // tools (split_mir.py) split on it.
+    let krate = tcx.crate_name(LOCAL_CRATE);
+    let package = match (std::env::var("CARGO_PKG_NAME"), std::env::var("CARGO_PKG_VERSION")) {
+        (Ok(name), Ok(version)) => format!(" (package {name} {version})"),
+        _ => String::new(),
+    };
+    let def_path = ty::print::with_no_trimmed_paths!(tcx.def_path_str(instance.def_id()));
+    let instance_str = ty::print::with_no_trimmed_paths!(instance.to_string());
+
     // Assembled first and appended with one write, so a dump is never split.
-    let mut out = format!("\n######### MIR {label} #########\n").into_bytes();
+    let mut out = format!(
+        "\n######### MIR {label} #########\n\
+         // crate: {krate}{package}\n\
+         // fn: {def_path}\n\
+         // instance: {instance_str}\n"
+    )
+    .into_bytes();
     out.extend_from_slice(&buf);
     out.extend_from_slice(format!("######### END {label} #########\n\n").as_bytes());
     let mut file = mir_dump_file(tcx).lock().unwrap();
@@ -278,7 +301,7 @@ fn apply_edits<'tcx>(
 
     let mut body = default.clone();
 
-    dump_body(tcx, &body, "before");
+    dump_body(tcx, instance, &body, "before");
 
     let local_decls = body.local_decls.clone();
     let mut bbs = body.basic_blocks_mut().to_owned();
@@ -714,7 +737,7 @@ fn apply_edits<'tcx>(
 
     *body.basic_blocks_mut() = bbs;
 
-    dump_body(tcx, &body, "after");
+    dump_body(tcx, instance, &body, "after");
 
     //tcx.arena.alloc(body)
     body
