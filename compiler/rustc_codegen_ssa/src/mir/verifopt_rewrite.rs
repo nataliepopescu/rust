@@ -92,28 +92,62 @@ static FN_OP_ARGS_OK: AtomicUsize = AtomicUsize::new(0);
 
 static CRATE_NAME: OnceLock<String> = OnceLock::new();
 
+/// Where every per-build output file goes: `VERIFOPT_STORE_DIR` (which
+/// cargo-verifopt sets on every rustc it spawns, dependencies included), else
+/// this process's CWD - the same resolution as dep_rewrite_store_path.
+/// Previously these used plain relative paths, so each crate's output landed
+/// in whatever CWD cargo gave its rustc (e.g. a crates.io dependency's own
+/// directory under ~/.cargo/registry/src), scattered across the filesystem.
+fn verifopt_out_dir() -> std::path::PathBuf {
+    match std::env::var_os("VERIFOPT_STORE_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::path::PathBuf::from("."),
+    }
+}
+
+/// Directory of per-crate MIR dumps: one file per rustc process, named
+/// `<crate>-<stable crate id>.txt`. One file per process (rather than one
+/// shared mir_dump.txt) because cargo compiles crates in parallel: appends
+/// from different processes would interleave in a shared file, and land in
+/// whatever order the processes happened to finish. Separate files never
+/// interleave, and reading them in sorted file-name order is deterministic.
+/// The stable crate id tells apart different compilations of a same-named
+/// crate (e.g. `rg` the binary vs `rg` the test harness).
+const MIR_DUMP_DIR: &str = "verifopt_mir_dumps";
+
 static MIR_DUMP_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 
-fn mir_dump_file() -> &'static Mutex<File> {
+fn mir_dump_file(tcx: TyCtxt<'_>) -> &'static Mutex<File> {
     MIR_DUMP_FILE.get_or_init(|| {
+        let dir = verifopt_out_dir().join(MIR_DUMP_DIR);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!(
+            "{}-{:016x}.txt",
+            tcx.crate_name(LOCAL_CRATE),
+            tcx.stable_crate_id(LOCAL_CRATE).as_u64()
+        ));
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("mir_dump.txt")
-            .expect("failed to open mir_dump.txt for writing");
+            .open(&path)
+            .unwrap_or_else(|e| panic!("failed to open {} for writing: {e}", path.display()));
         Mutex::new(file)
     })
 }
 
 static EDIT_KIND_STATS_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 
+/// One shared file for the whole build (lines are only ever counted, so
+/// cross-process order doesn't matter); each line is appended with a single
+/// write, so lines from parallel rustc processes can't interleave.
 fn edit_kind_stats_file() -> &'static Mutex<File> {
     EDIT_KIND_STATS_FILE.get_or_init(|| {
+        let path = verifopt_out_dir().join("verifopt_edit_kind_stats.txt");
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("verifopt_edit_kind_stats.txt")
-            .expect("failed to open verifopt_edit_kind_stats.txt for writing");
+            .open(&path)
+            .unwrap_or_else(|e| panic!("failed to open {} for writing: {e}", path.display()));
         Mutex::new(file)
     })
 }
@@ -133,7 +167,7 @@ fn edit_kind_stats_file() -> &'static Mutex<File> {
 /// runs at process exit).
 fn log_edit_kind(kind: &str) {
     let mut file = edit_kind_stats_file().lock().unwrap();
-    let _ = writeln!(file, "{kind}");
+    let _ = file.write_all(format!("{kind}\n").as_bytes());
 }
 
 fn dump_body<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, label: &str) {
@@ -142,10 +176,12 @@ fn dump_body<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, label: &str) {
     let writer = MirWriter::new(tcx);
     let _ = ty::print::with_no_trimmed_paths!(writer.write_mir_fn(body, &mut buf));
 
-    let mut file = mir_dump_file().lock().unwrap();
-    let _ = writeln!(file, "\n######### MIR {label} #########");
-    let _ = file.write_all(&buf);
-    let _ = writeln!(file, "######### END {label} #########\n");
+    // Assembled first and appended with one write, so a dump is never split.
+    let mut out = format!("\n######### MIR {label} #########\n").into_bytes();
+    out.extend_from_slice(&buf);
+    out.extend_from_slice(format!("######### END {label} #########\n\n").as_bytes());
+    let mut file = mir_dump_file(tcx).lock().unwrap();
+    let _ = file.write_all(&out);
 }
 
 enum Edit {
