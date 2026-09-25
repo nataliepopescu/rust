@@ -935,6 +935,77 @@ impl<'tcx> Linkable<'tcx> {
     }
 }
 
+/// Resolves a non-closure dispatch target the way the vtable slot was filled:
+/// build the concrete Self type, then resolve the *trait method* (the
+/// original callee) with that Self and the call site's own trait/method args.
+/// rustc's trait selection then returns the impl method with its correctly
+/// ordered generic args - which the recorded hashes are not:
+///
+/// - for an impl method, the analysis records the *ADT's* args. Those equal
+///   the impl's parameters only when the impl is exactly `impl<P..> Tr for
+///   Adt<P..>`. `impl<B, I, F> Iterator for Map<I, F>` has an extra `B`;
+///   tock's `impl<'a> Client for Foo` (Foo without a lifetime) has a
+///   parameter the ADT doesn't; others reorder them.
+/// - for a trait default method, it records only `[Self]`, but the method's
+///   args are `[Self, <trait params>..]` - and nearly every tock HIL trait
+///   has one (`Alarm<'a>`, `Client<'a>`, ...).
+///
+/// Both produced a wrong arg count ("FAILED at args.len() check"), so those
+/// sites were never rewritten. Returns None (fall back to the recorded args)
+/// when this doesn't apply: closure-like targets (handled separately below),
+/// non-trait callees, impls whose Self isn't an ADT, or a selection result
+/// that isn't the recorded target (then the store and rustc disagree, and
+/// the caller's fallback decides).
+fn resolve_target_via_trait<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    orig_callee: DefId,
+    target_did: DefId,
+    self_hashes: &Option<Vec<DefPathHash>>,
+    gen_args: &'tcx List<GenericArg<'tcx>>,
+) -> Option<Instance<'tcx>> {
+    if tcx.is_closure_like(target_did)
+        || gen_args.is_empty()
+        || tcx.trait_of_assoc(orig_callee).is_none()
+    {
+        return None;
+    }
+    let recorded: Vec<GenericArg<'tcx>> = match self_hashes {
+        Some(hashes) => {
+            hashes.iter().map(|h| arg_from_hash(tcx, *h, &SHAPES)).collect::<Option<_>>()?
+        }
+        None => Vec::new(),
+    };
+
+    let parent = tcx.parent(target_did);
+    let self_ty = if tcx.def_kind(parent) == DefKind::Trait {
+        // Default method: the recorded args are [Self].
+        recorded.first()?.as_type()?
+    } else {
+        // Impl method: the recorded args are the Self ADT's own args.
+        let ty::Adt(adt_def, _) = *tcx.type_of(parent).instantiate_identity().kind() else {
+            return None;
+        };
+        if recorded.len() != tcx.generics_of(adt_def.did()).count() {
+            return None;
+        }
+        Ty::new_adt(tcx, adt_def, tcx.mk_args(&recorded))
+    };
+
+    let callee_args = tcx.mk_args_from_iter(
+        std::iter::once(GenericArg::from(self_ty)).chain(gen_args.iter().skip(1)),
+    );
+    match Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), orig_callee, callee_args) {
+        Ok(Some(inst)) if inst.def_id() == target_did => Some(inst),
+        other => {
+            debug!(
+                "[verifopt debug][fn_op] resolving {:?} via {:?} with Self={:?} gave {:?}, not the recorded target",
+                target_did, orig_callee, self_ty, other
+            );
+            None
+        }
+    }
+}
+
 fn fn_op<'tcx>(
     tcx: TyCtxt<'tcx>,
     // The DefId of the original (virtual) callee, e.g. FnMut::call_mut.
@@ -953,48 +1024,60 @@ fn fn_op<'tcx>(
         }
     };
 
-    let args = match &self_hashes {
-        Some(hashes) => {
-            // Each hash is one generic arg (lifetimes included, as a fixed
-            // sentinel), so the rebuilt list has the target's own arity.
-            let arg_list: Vec<GenericArg<'tcx>> = match hashes
-                .iter()
-                .map(|h| arg_from_hash(tcx, *h, &SHAPES).ok_or(()))
-                .collect::<Result<Vec<_>, ()>>()
-            {
-                Ok(v) => v,
-                Err(_) => {
-                    debug!("[verifopt debug][fn_op] FAILED at self_hashes -> args resolution, target_did={:?} self_hashes={:?}", target_did, self_hashes);
-                    return Err(());
-                }
-            };
-            tcx.mk_args(&arg_list)
-        }
-        None => tcx.mk_args_from_iter(gen_args.iter().skip(1)),
-    };
-
     let _ = CRATE_NAME.get_or_init(|| tcx.crate_name(LOCAL_CRATE).to_string());
-    if args.len() != tcx.generics_of(target_did).count() {
-        debug!(
-            "[verifopt debug][fn_op] FAILED at args.len() check: target_did={:?} args={:?} args.len()={:?} expected_count={:?}",
-            target_did,
-            args,
-            args.len(),
-            tcx.generics_of(target_did).count(),
-        );
-        FN_OP_ARGS_MISMATCH.fetch_add(1, Ordering::Relaxed);
-        return Err(());
-    }
-    FN_OP_ARGS_OK.fetch_add(1, Ordering::Relaxed);
 
-    let instance =
+    // Preferred: let rustc's trait selection pick the impl, the same way the
+    // vtable slot was filled (see resolve_target_via_trait). The recorded
+    // hashes are the *ADT's* (or, for a default method, just Self's) generic
+    // args, which only coincide with the target method's own args when its
+    // impl's parameters happen to be exactly the ADT's, in order.
+    let instance = if let Some(inst) =
+        resolve_target_via_trait(tcx, orig_callee, target_did, &self_hashes, gen_args)
+    {
+        FN_OP_ARGS_OK.fetch_add(1, Ordering::Relaxed);
+        inst
+    } else {
+        let args = match &self_hashes {
+            Some(hashes) => {
+                // Each hash is one generic arg (lifetimes included, as a fixed
+                // sentinel), so the rebuilt list has the target's own arity.
+                let arg_list: Vec<GenericArg<'tcx>> = match hashes
+                    .iter()
+                    .map(|h| arg_from_hash(tcx, *h, &SHAPES).ok_or(()))
+                    .collect::<Result<Vec<_>, ()>>()
+                {
+                    Ok(v) => v,
+                    Err(_) => {
+                        debug!("[verifopt debug][fn_op] FAILED at self_hashes -> args resolution, target_did={:?} self_hashes={:?}", target_did, self_hashes);
+                        return Err(());
+                    }
+                };
+                tcx.mk_args(&arg_list)
+            }
+            None => tcx.mk_args_from_iter(gen_args.iter().skip(1)),
+        };
+
+        if args.len() != tcx.generics_of(target_did).count() {
+            debug!(
+                "[verifopt debug][fn_op] FAILED at args.len() check: target_did={:?} args={:?} args.len()={:?} expected_count={:?}",
+                target_did,
+                args,
+                args.len(),
+                tcx.generics_of(target_did).count(),
+            );
+            FN_OP_ARGS_MISMATCH.fetch_add(1, Ordering::Relaxed);
+            return Err(());
+        }
+        FN_OP_ARGS_OK.fetch_add(1, Ordering::Relaxed);
+
         match Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), target_did, args) {
             Ok(Some(inst)) => inst,
             other => {
                 debug!("[verifopt debug][fn_op] FAILED at Instance::try_resolve: target_did={:?} args={:?} result={:?}", target_did, args, other);
                 return Err(());
             }
-        };
+        }
+    };
 
     let raw_self_ty = if tcx.is_closure_like(target_did) {
         // A closure's own tcx.parent() is just whatever function it's
