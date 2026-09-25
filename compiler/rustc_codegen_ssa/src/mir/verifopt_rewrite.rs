@@ -694,7 +694,7 @@ fn apply_edits<'tcx>(
                     .iter()
                     .map(|(bb, stmt, _, _, _)| (*bb, *stmt))
                     .collect();
-                if found != Some(planned) {
+                if found.as_ref() != Some(&planned) {
                     log_skip(
                         tcx,
                         instance,
