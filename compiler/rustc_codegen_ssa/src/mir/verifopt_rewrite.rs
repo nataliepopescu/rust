@@ -37,10 +37,7 @@ use rustc_verifopt::{ShapeRegistry, Store, arg_from_hash, def_id_from_hash, hash
 
 
 pub(super) fn dep_rewrite_store_path() -> std::path::PathBuf {
-    match std::env::var_os("VERIFOPT_STORE_DIR") {
-        Some(dir) => std::path::PathBuf::from(dir).join("verifopt_store.json"),
-        None => "verifopt_store.json".into(),
-    }
+    verifopt_out_dir().join("verifopt_store.json")
 }
 
 static SHARED_STORE: OnceLock<Option<Store>> = OnceLock::new();
@@ -98,10 +95,15 @@ static CRATE_NAME: OnceLock<String> = OnceLock::new();
 /// Previously these used plain relative paths, so each crate's output landed
 /// in whatever CWD cargo gave its rustc (e.g. a crates.io dependency's own
 /// directory under ~/.cargo/registry/src), scattered across the filesystem.
+///
+/// cargo-verifopt points VERIFOPT_STORE_DIR at `<run dir>/verifopt_results`,
+/// the one directory for all of a run's verifopt outputs. Without it (a
+/// hand-run rustc), fall back to `./verifopt_results`, matching the plugin's
+/// rewrite::results_dir.
 fn verifopt_out_dir() -> std::path::PathBuf {
     match std::env::var_os("VERIFOPT_STORE_DIR") {
         Some(dir) => std::path::PathBuf::from(dir),
-        None => std::path::PathBuf::from("."),
+        None => std::path::PathBuf::from("verifopt_results"),
     }
 }
 
@@ -142,7 +144,9 @@ static EDIT_KIND_STATS_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 /// write, so lines from parallel rustc processes can't interleave.
 fn edit_kind_stats_file() -> &'static Mutex<File> {
     EDIT_KIND_STATS_FILE.get_or_init(|| {
-        let path = verifopt_out_dir().join("verifopt_edit_kind_stats.txt");
+        let dir = verifopt_out_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("verifopt_edit_kind_stats.txt");
         let file = OpenOptions::new()
             .create(true)
             .append(true)
