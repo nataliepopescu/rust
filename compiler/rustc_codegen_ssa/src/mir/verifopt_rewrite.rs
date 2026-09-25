@@ -291,6 +291,29 @@ fn compute_edits<'tcx>(
         .collect()
 }
 
+/// One line per dispatch site the rewrite leaves alone, in a fixed format so a
+/// build log can be tallied by crate and reason:
+///
+///   [verifopt skip] crate=<crate being compiled> reason=<code> site=<caller instance> bb<N>: <detail>
+///
+/// `crate` is the crate being *compiled*, which for a generic function is the
+/// instantiating crate, not the one that defines it - the caller's own path
+/// (e.g. `kernel::..`) names the latter. Reason codes: `receiver` (not a
+/// reference/raw pointer), `unresolved` (a target can't be named here),
+/// `unlinkable`, `check_site` (other resolution failure), `not_dyn`,
+/// `vtable_slot`, `tagged_casts` (the planned tag sites aren't the casts
+/// feeding this dispatch within this function), `not_call`.
+fn log_skip(tcx: TyCtxt<'_>, instance: Instance<'_>, bb: BasicBlock, reason: &str, detail: &str) {
+    debug!(
+        "[verifopt skip] crate={} reason={} site={} {:?}: {}",
+        tcx.crate_name(LOCAL_CRATE),
+        reason,
+        ty::print::with_no_trimmed_paths!(instance.to_string()),
+        bb,
+        detail
+    );
+}
+
 fn apply_edits<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
@@ -325,14 +348,21 @@ fn apply_edits<'tcx>(
                 ..
             } = &term.kind
             else {
+                log_skip(tcx, instance, bb, "not_call", "terminator is not a Call");
                 continue;
             };
             let (defid, gen_args) = match func {
                 Operand::Constant(c) => match c.const_.ty().kind() {
                     FnDef(defid, a) => (*defid, *a), // *a: &'tcx List is Copy
-                    _ => continue,
+                    _ => {
+                        log_skip(tcx, instance, bb, "not_call", "callee is not an FnDef");
+                        continue;
+                    }
                 },
-                _ => continue,
+                _ => {
+                    log_skip(tcx, instance, bb, "not_call", "callee is not a constant");
+                    continue;
+                }
             };
             (
                 defid,
@@ -351,7 +381,7 @@ fn apply_edits<'tcx>(
         // unsupported receiver bails out before any statements are emitted.
         let recv_ty = args[0].node.ty(&local_decls, tcx);
         let Some(recv_kind) = RecvKind::of(recv_ty) else {
-            debug!("[verifopt debug][apply_edits] skipping bb {:?}: unsupported receiver type {:?}", bb, recv_ty);
+            log_skip(tcx, instance, bb, "receiver", &format!("unsupported receiver type {recv_ty:?}"));
             continue;
         };
 
@@ -369,12 +399,21 @@ fn apply_edits<'tcx>(
         if let Err(why) =
             linkable.check_site(defid, gen_args, span, &site_targets, compares_fn_ptrs)
         {
+            // Kept for existing greps; log_skip is the tallyable form.
             debug!(
-                "[verifopt debug][apply_edits] leaving {:?} bb{:?} unrewritten: {}",
+                "[verifopt debug][apply_edits] leaving {:?} {:?} unrewritten: {}",
                 instance.def_id(),
                 bb,
                 why
             );
+            let reason = if why.contains("could not be resolved") {
+                "unresolved"
+            } else if why.contains("not linkable") {
+                "unlinkable"
+            } else {
+                "check_site"
+            };
+            log_skip(tcx, instance, bb, reason, &why);
             continue;
         }
 
@@ -424,6 +463,7 @@ fn apply_edits<'tcx>(
                         principal.with_self_ty(tcx, pointee_ty).skip_binder()
                     }
                     _ => {
+                        log_skip(tcx, instance, bb, "not_dyn", &format!("receiver pointee {pointee_ty:?} is not dyn"));
                         continue;
                     }
                 };
@@ -480,6 +520,7 @@ fn apply_edits<'tcx>(
                     .unwrap();
 
                 let VtblEntry::Method(vtable_instance) = &entries[slot_idx] else {
+                    log_skip(tcx, instance, bb, "vtable_slot", "vtable slot is not a method");
                     continue;
                 };
 
@@ -654,6 +695,16 @@ fn apply_edits<'tcx>(
                     .map(|(bb, stmt, _, _, _)| (*bb, *stmt))
                     .collect();
                 if found != Some(planned) {
+                    log_skip(
+                        tcx,
+                        instance,
+                        bb,
+                        "tagged_casts",
+                        &format!(
+                            "casts found in this function {:?} != planned tag sites {:?}",
+                            found, planned
+                        ),
+                    );
                     continue;
                 }
 
