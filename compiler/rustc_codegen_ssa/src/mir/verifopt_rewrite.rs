@@ -302,7 +302,9 @@ fn compute_edits<'tcx>(
 /// reference/raw pointer), `unresolved` (a target can't be named here),
 /// `unlinkable`, `check_site` (other resolution failure), `not_dyn`,
 /// `vtable_slot`, `tagged_casts` (the planned tag sites aren't the casts
-/// feeding this dispatch within this function), `not_call`.
+/// feeding this dispatch within this function), `not_call`, `not_virtual`
+/// (the call at the stored block isn't a dynamic dispatch - see the safety
+/// check in apply_edits).
 fn log_skip(tcx: TyCtxt<'_>, instance: Instance<'_>, bb: BasicBlock, reason: &str, detail: &str) {
     debug!(
         "[verifopt skip] crate={} reason={} site={} {:?}: {}",
@@ -312,6 +314,24 @@ fn log_skip(tcx: TyCtxt<'_>, instance: Instance<'_>, bb: BasicBlock, reason: &st
         bb,
         detail
     );
+}
+
+/// One concrete function a Pointers rewrite can compare against and call: the
+/// resolved instance, its callee operand, and the Self type to narrow the
+/// receiver to.
+#[derive(Clone)]
+struct Cand<'tcx> {
+    instance: Instance<'tcx>,
+    fnc: Operand<'tcx>,
+    self_ty: Ty<'tcx>,
+}
+
+/// What apply_edits actually emits for a site, decided before touching the
+/// body (see the comment above the `plan` computation).
+enum Plan<'tcx> {
+    Single(DefPathHash, Option<Vec<DefPathHash>>),
+    Pointers(Vec<Cand<'tcx>>),
+    Tagged(Vec<(usize, usize, u64, DefPathHash, Option<Vec<DefPathHash>>)>),
 }
 
 fn apply_edits<'tcx>(
@@ -385,20 +405,50 @@ fn apply_edits<'tcx>(
             continue;
         };
 
-        // Also up front: every function this edit would reference must be
-        // linkable from here (see Linkable). If any isn't - or any target
-        // can't be resolved at all - leave the whole site's dyn call alone;
-        // that's always correct. (This also means a Pointers/Tagged arm can
-        // no longer fail fn_op halfway through building the site.)
-        let site_targets: Vec<(DefPathHash, Option<Vec<DefPathHash>>)> = match &edit {
-            Edit::Single(h, s) => vec![(*h, s.clone())],
-            Edit::Pointers(ts) => ts.clone(),
-            Edit::Tagged(sites) => sites.iter().map(|(_, _, _, h, s)| (*h, s.clone())).collect(),
-        };
-        let compares_fn_ptrs = matches!(edit, Edit::Pointers(_));
-        if let Err(why) =
-            linkable.check_site(defid, gen_args, span, &site_targets, compares_fn_ptrs)
-        {
+        // Safety check, part 1: the call at this block must really be a
+        // dynamic dispatch - a trait method on a `dyn` receiver, which
+        // resolves to a vtable call. Store entries are keyed by basic-block
+        // index, so a store that doesn't match this code (the source changed
+        // since the analysis - e.g. a new `#[inline]` letting the MIR inliner
+        // renumber a caller's blocks - or a different toolchain or flags) can
+        // point at an unrelated call. Without this, a Single edit would
+        // replace that call with a direct call to the recorded target - a
+        // miscompile rather than a skip. (Part 2, that every target
+        // implements the dispatched method, is in fn_op.)
+        match Instance::try_resolve(tcx, TypingEnv::fully_monomorphized(), defid, gen_args) {
+            Ok(Some(callee)) if matches!(callee.def, InstanceKind::Virtual(..)) => {}
+            other => {
+                log_skip(
+                    tcx,
+                    instance,
+                    bb,
+                    "not_virtual",
+                    &format!("callee {defid:?} resolves to {other:?}, not a dynamic dispatch"),
+                );
+                continue;
+            }
+        }
+
+        // Decide what to emit, still before touching the body. Only Single has
+        // no fallback, so only it must get every target exactly right. A
+        // Pointers rewrite compares the vtable slot against each candidate and
+        // otherwise makes the original dyn call - so it's correct for *any*
+        // subset of the real targets, and a candidate that can't be resolved
+        // or linked here is dropped rather than sinking the whole site. That
+        // is what lets the rest of this work:
+        //
+        // - a generic target with no recorded args (a CHA fallback candidate:
+        //   the analysis couldn't trace the receiver, and CHA knows which
+        //   impls exist but not how they're instantiated) is expanded into
+        //   every instance of it compiled in this crate (Linkable::candidates_for);
+        // - a Single whose one target can't be built that way becomes a
+        //   Pointers over its expansion;
+        // - a Tagged site whose tag sites aren't the casts feeding this
+        //   dispatch in this function (the usual case when trait objects are
+        //   created far from where they're used, e.g. during board setup), or
+        //   whose targets don't all resolve, becomes a Pointers over the same
+        //   targets instead of being skipped.
+        let skip = |reason: &str, why: &str| {
             // Kept for existing greps; log_skip is the tallyable form.
             debug!(
                 "[verifopt debug][apply_edits] leaving {:?} {:?} unrewritten: {}",
@@ -406,19 +456,73 @@ fn apply_edits<'tcx>(
                 bb,
                 why
             );
-            let reason = if why.contains("could not be resolved") {
-                "unresolved"
-            } else if why.contains("not linkable") {
-                "unlinkable"
-            } else {
-                "check_site"
-            };
-            log_skip(tcx, instance, bb, reason, &why);
-            continue;
-        }
-
-        match edit {
+            log_skip(tcx, instance, bb, reason, why);
+        };
+        let pointers_plan = |targets: &[(DefPathHash, Option<Vec<DefPathHash>>)]| -> Result<Plan<'tcx>, String> {
+            let cands = linkable.pointer_candidates(instance, bb, defid, gen_args, span, targets)?;
+            Ok(Plan::Pointers(cands))
+        };
+        let plan = match edit {
             Edit::Single(hash, self_hash) => {
+                match linkable.check_site(defid, gen_args, span, &[(hash, self_hash.clone())], false) {
+                    Ok(()) => Ok(Plan::Single(hash, self_hash)),
+                    Err(why) => pointers_plan(&[(hash, self_hash)]).map_err(|_| why),
+                }
+            }
+            Edit::Pointers(targets) => pointers_plan(&targets),
+            Edit::Tagged(sites) => {
+                let targets: Vec<(DefPathHash, Option<Vec<DefPathHash>>)> = {
+                    let mut t = Vec::new();
+                    for (_, _, _, h, s) in &sites {
+                        if !t.contains(&(*h, s.clone())) {
+                            t.push((*h, s.clone()));
+                        }
+                    }
+                    t
+                };
+                let casts_match = match &args[0].node {
+                    Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => {
+                        let preds = default.basic_blocks.predecessors();
+                        let found =
+                            find_casts(&bbs, preds, bb_idx, p.local, &mut HashSet::default());
+                        let planned: HashSet<(usize, usize)> =
+                            sites.iter().map(|(bb, stmt, _, _, _)| (*bb, *stmt)).collect();
+                        found.as_ref() == Some(&planned)
+                    }
+                    _ => false,
+                };
+                if casts_match && linkable.check_site(defid, gen_args, span, &targets, false).is_ok() {
+                    Ok(Plan::Tagged(sites))
+                } else {
+                    debug!(
+                        "[verifopt debug][apply_edits] {:?} {:?}: Tagged not applicable (casts_match={}), trying Pointers",
+                        instance.def_id(),
+                        bb,
+                        casts_match
+                    );
+                    pointers_plan(&targets)
+                }
+            }
+        };
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(why) => {
+                let reason = if why.contains("could not be resolved") {
+                    "unresolved"
+                } else if why.contains("not linkable") {
+                    "unlinkable"
+                } else if why.contains("no candidates") {
+                    "no_candidates"
+                } else {
+                    "check_site"
+                };
+                skip(reason, &why);
+                continue;
+            }
+        };
+
+        match plan {
+            Plan::Single(hash, self_hash) => {
                 let (fnc, self_ty) = match fn_op(tcx, defid, hash, self_hash, gen_args, span) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -447,7 +551,7 @@ fn apply_edits<'tcx>(
                 }
             }
 
-            Edit::Pointers(hashes) => {
+            Plan::Pointers(cands) => {
                 let _ = CRATE_NAME.get_or_init(|| tcx.crate_name(LOCAL_CRATE).to_string());
 
                 let op = args[0].node.clone();
@@ -584,14 +688,10 @@ fn apply_edits<'tcx>(
                     *t = call_guard(&mut bbs, *t, source_info, is_cleanup);
                 }
                 let mut fallback = bbs.push(BasicBlockData::new_stmts(vec![], Some(orig), false));
-                let n = hashes.len();
+                let n = cands.len();
 
-                for (i, (hash, self_hash)) in hashes.iter().enumerate() {
-                    let (fnc, self_ty) = match fn_op(tcx, defid, *hash, self_hash.clone(), gen_args, span)
-                    {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
+                for (i, Cand { fnc, self_ty, .. }) in cands.iter().enumerate() {
+                    let self_ty = *self_ty;
 
                     let (recv, new_stmts) = narrow_dyn(
                         tcx,
@@ -680,7 +780,7 @@ fn apply_edits<'tcx>(
                 log_edit_kind("pointers");
             }
 
-            Edit::Tagged(sites) => {
+            Plan::Tagged(sites) => {
                 let recv_local = match &args[0].node {
                     Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => p.local,
                     _ => continue,
@@ -889,6 +989,172 @@ impl<'tcx> Linkable<'tcx> {
         }
     }
 
+    /// The concrete functions a Pointers rewrite may use for one recorded
+    /// target, each resolved and linkable from here:
+    /// - the recorded target itself, if its instance can be built (fn_op);
+    /// - otherwise, for a generic target recorded without generic args (a
+    ///   CHA fallback candidate), every instance of it compiled in this crate.
+    ///   Each is a real implementation of the dispatched method for its own
+    ///   Self type; which one (if any) the object actually has is decided at
+    ///   runtime by the vtable-slot comparison, so any of them is safe to
+    ///   offer.
+    fn candidates_for(
+        &self,
+        orig_callee: DefId,
+        gen_args: &'tcx List<GenericArg<'tcx>>,
+        span: Span,
+        hash: DefPathHash,
+        self_hashes: &Option<Vec<DefPathHash>>,
+    ) -> Result<Vec<Cand<'tcx>>, String> {
+        let tcx = self.tcx;
+        let env = TypingEnv::fully_monomorphized();
+
+        if let Ok((fnc, self_ty)) = fn_op(tcx, orig_callee, hash, self_hashes.clone(), gen_args, span) {
+            let Operand::Constant(c) = &fnc else {
+                return Err(format!("target {hash:?} is not a constant fn operand"));
+            };
+            let ty::FnDef(did, args) = *c.const_.ty().kind() else {
+                return Err(format!("target {hash:?} is not an FnDef"));
+            };
+            let instance = match Instance::try_resolve(tcx, env, did, args) {
+                Ok(Some(i)) => i,
+                _ => return Err(format!("target {did:?} does not resolve to an instance")),
+            };
+            self.check_pointer_target(instance, did, args)?;
+            return Ok(vec![Cand { instance, fnc, self_ty }]);
+        }
+
+        // No usable args recorded: expand a generic target into its local instances.
+        let expandable = self_hashes.is_none()
+            && def_id_from_hash(tcx, hash).is_some_and(|did| {
+                !tcx.is_closure_like(did) && tcx.generics_of(did).count() > 0
+            });
+        if !expandable {
+            return Err(format!("target {hash:?} could not be resolved"));
+        }
+        let did = def_id_from_hash(tcx, hash).unwrap();
+        if !implements_dispatched_method(tcx, did, orig_callee) {
+            return Err(format!(
+                "target {did:?} does not implement the dispatched method {orig_callee:?}"
+            ));
+        }
+        let mut out: Vec<Cand<'tcx>> = Vec::new();
+        for cgu in self.all_cgus {
+            for item in cgu.items().keys() {
+                let MonoItem::Fn(inst) = *item else { continue };
+                if inst.def_id() != did
+                    || !matches!(inst.def, InstanceKind::Item(_))
+                    || out.iter().any(|c| c.instance == inst)
+                {
+                    continue;
+                }
+                let parent = tcx.parent(did);
+                let raw_self_ty = if tcx.def_kind(parent) == DefKind::Trait {
+                    inst.args.type_at(0)
+                } else {
+                    tcx.type_of(parent).instantiate(tcx, inst.args)
+                };
+                let Ok(self_ty) = tcx.try_normalize_erasing_regions(env, raw_self_ty) else {
+                    continue;
+                };
+                if self.check_pointer_target(inst, did, inst.args).is_err() {
+                    continue;
+                }
+                let fnc = Operand::Constant(Box::new(ConstOperand {
+                    span,
+                    user_ty: None,
+                    const_: Const::zero_sized(Ty::new_fn_def(tcx, did, inst.args)),
+                }));
+                out.push(Cand { instance: inst, fnc, self_ty });
+            }
+        }
+        if out.is_empty() {
+            return Err(format!(
+                "target {hash:?} could not be resolved, and no linkable instance of {did:?} is compiled in this crate"
+            ));
+        }
+        debug!(
+            "[verifopt debug][apply_edits] expanded generic target {:?} (no recorded args) into {} local instance(s)",
+            did,
+            out.len()
+        );
+        Ok(out)
+    }
+
+    /// For a Pointers candidate: the callee must be referenceable, and so must
+    /// the function pointer compared against the vtable slot.
+    fn check_pointer_target(
+        &self,
+        callee: Instance<'tcx>,
+        did: DefId,
+        args: ty::GenericArgsRef<'tcx>,
+    ) -> Result<(), String> {
+        if !self.can_reference(callee) {
+            return Err(format!("target {callee:?} is not linkable from here"));
+        }
+        match Instance::resolve_for_fn_ptr(self.tcx, TypingEnv::fully_monomorphized(), did, args) {
+            Some(fp) if self.can_reference(fp) => Ok(()),
+            Some(fp) => Err(format!("fn pointer {fp:?} is not linkable from here")),
+            None => Err(format!("target {did:?} has no fn-pointer instance")),
+        }
+    }
+
+    /// Every candidate for a Pointers rewrite of one site: each recorded
+    /// target's candidates (see candidates_for), with targets that yield none
+    /// dropped - sound, since unmatched objects take the original dyn call -
+    /// deduplicated, and capped at MAX_POINTERS_CANDIDATES (any subset is
+    /// sound too). Err only if nothing at all is usable.
+    fn pointer_candidates(
+        &self,
+        caller: Instance<'tcx>,
+        bb: BasicBlock,
+        orig_callee: DefId,
+        gen_args: &'tcx List<GenericArg<'tcx>>,
+        span: Span,
+        targets: &[(DefPathHash, Option<Vec<DefPathHash>>)],
+    ) -> Result<Vec<Cand<'tcx>>, String> {
+        let mut cands: Vec<Cand<'tcx>> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+        for (hash, self_hashes) in targets {
+            match self.candidates_for(orig_callee, gen_args, span, *hash, self_hashes) {
+                Ok(found) => {
+                    for c in found {
+                        if !cands.iter().any(|x| x.instance == c.instance) {
+                            cands.push(c);
+                        }
+                    }
+                }
+                Err(why) => dropped.push(why),
+            }
+        }
+        for why in &dropped {
+            debug!(
+                "[verifopt drop] crate={} site={} {:?}: {}",
+                self.tcx.crate_name(LOCAL_CRATE),
+                ty::print::with_no_trimmed_paths!(caller.to_string()),
+                bb,
+                why
+            );
+        }
+        if cands.is_empty() {
+            return Err(format!(
+                "no candidates left for Pointers: {}",
+                dropped.first().map(String::as_str).unwrap_or("no targets")
+            ));
+        }
+        if cands.len() > MAX_POINTERS_CANDIDATES {
+            debug!(
+                "[verifopt debug][apply_edits] {:?} {:?}: {} candidates, keeping the first {}",
+                caller.def_id(),
+                bb,
+                cands.len(),
+                MAX_POINTERS_CANDIDATES
+            );
+            cands.truncate(MAX_POINTERS_CANDIDATES);
+        }
+        Ok(cands)
+    }
+
     /// Resolves every target of a site the way codegen will, and checks each
     /// function it would reference: the callee, and for Pointers also the
     /// function pointer it compares against the vtable slot (which can be a
@@ -933,6 +1199,29 @@ impl<'tcx> Linkable<'tcx> {
         }
         Ok(())
     }
+}
+
+/// Safety check, part 2: whether `target` can be what a dynamic dispatch of
+/// `method` (a trait method) calls. True for the method's own default body,
+/// for an impl item implementing exactly that trait method, and for a closure
+/// or fn item dispatched through an Fn-family trait (they implement nothing
+/// else). Anything else means the store entry doesn't describe this call -
+/// e.g. the block now holds a different dyn call than the one analyzed - and
+/// using it would call an unrelated function. Pointers rewrites would never
+/// match such a target at runtime anyway, but Single and Tagged have no
+/// runtime type check, so it's enforced for every edit kind (in fn_op, and in
+/// Linkable::candidates_for's expansion).
+fn implements_dispatched_method(tcx: TyCtxt<'_>, target: DefId, method: DefId) -> bool {
+    if target == method {
+        return true;
+    }
+    if tcx.is_closure_like(target) || matches!(tcx.def_kind(target), DefKind::Fn) {
+        return tcx.trait_of_assoc(method).is_some_and(|t| {
+            tcx.is_fn_trait(t) || tcx.async_fn_trait_kind_from_def_id(t).is_some()
+        });
+    }
+    matches!(tcx.def_kind(target), DefKind::AssocFn)
+        && tcx.associated_item(target).trait_item_def_id() == Some(method)
 }
 
 /// Resolves a non-closure dispatch target the way the vtable slot was filled:
@@ -1023,6 +1312,14 @@ fn fn_op<'tcx>(
             return Err(());
         }
     };
+
+    if !implements_dispatched_method(tcx, target_did, orig_callee) {
+        debug!(
+            "[verifopt debug][fn_op] FAILED: target {:?} does not implement the dispatched method {:?}",
+            target_did, orig_callee
+        );
+        return Err(());
+    }
 
     let _ = CRATE_NAME.get_or_init(|| tcx.crate_name(LOCAL_CRATE).to_string());
 
