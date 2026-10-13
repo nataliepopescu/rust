@@ -288,6 +288,18 @@ impl<'tcx> UsageMap<'tcx> {
         assert!(self.used_map.insert(user_item, used_items.items().collect()).is_none());
     }
 
+    /// Records one more use, `user` -> `used`, after collection. For uses the
+    /// collector couldn't see because they're introduced later - verifopt's
+    /// codegen-time rewrite of dynamic dispatches into direct calls (see
+    /// partitioning::add_verifopt_rewrite_uses).
+    pub(crate) fn record_extra_use(&mut self, user: MonoItem<'tcx>, used: MonoItem<'tcx>) {
+        let used_items = self.used_map.entry(user).or_default();
+        if !used_items.contains(&used) {
+            used_items.push(used);
+            self.user_map.entry(used).or_default().push(user);
+        }
+    }
+
     pub(crate) fn get_user_items(&self, item: MonoItem<'tcx>) -> &[MonoItem<'tcx>] {
         self.user_map.get(&item).map(|items| items.as_slice()).unwrap_or(&[])
     }

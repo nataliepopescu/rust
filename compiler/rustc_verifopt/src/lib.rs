@@ -24,4 +24,4 @@ pub use shape::{
     ArgShape, HashBytes, PredShape, ShapeRegistry, TyShape, arg_from_hash, arg_from_shape, arg_to_shape,
     def_id_from_hash, ty_from_shape, ty_to_shape,
 };
-pub use store::{SiteKey, Store, TagSite, Target};
+pub use store::{SiteKey, Store, TagSite, Target, load_store, store_path};

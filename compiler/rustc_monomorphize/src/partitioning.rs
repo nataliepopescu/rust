@@ -1128,6 +1128,107 @@ where
     }
 }
 
+/// Tells partitioning about the calls verifopt's rewrite will add.
+///
+/// The rewrite (rustc_codegen_ssa's verifopt_rewrite) turns a dynamic dispatch
+/// into direct calls to its targets during *codegen*, after partitioning has
+/// already decided, from the collector's view of the *original* MIR, which
+/// codegen unit each instance lives in, whether it gets internal linkage, and
+/// which units get their own copy of an inline (LocalCopy) item. None of
+/// that accounts for the new calls, so a target could end up internal in a
+/// different unit than the dispatching function - unreferenceable from it, so
+/// the rewrite's linkability check (correctly) skipped the site. That's what
+/// left e.g. ripgrep's `rg::search`/`rg::files` loops unrewritten with the
+/// default 16 codegen units.
+///
+/// So: for every function with stored dispatch sites, record "caller uses
+/// target" for each instance of each of its sites' targets, as the collector
+/// would have for a direct call. Partitioning then keeps such targets
+/// referenceable from the caller's unit (not internal, or a local copy
+/// there). This over-approximates harmlessly: it ignores which instance of a
+/// generic caller has the site, and adds every instance of a target - extra
+/// edges can only prevent internalization or add a copy, never break code.
+///
+/// Also warns when the store was clearly produced for a differently
+/// configured build of this crate (Store::crate_id_mismatch), which otherwise
+/// shows up only as a silent absence of rewrites.
+// Map iteration below only builds sets/lookup tables; every edge is added in
+// the (deterministic) collection order of `items`, with targets sorted.
+#[allow(rustc::potential_query_instability)]
+fn add_verifopt_rewrite_uses<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    items: &[MonoItem<'tcx>],
+    usage_map: &mut UsageMap<'tcx>,
+) {
+    use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+    use rustc_span::def_id::DefPathHash;
+
+    let store = match rustc_verifopt::load_store() {
+        Ok(store) => store,
+        Err(why) => {
+            debug!("[verifopt] no rewrite uses added: {why}");
+            return;
+        }
+    };
+
+    let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
+    let crate_id = tcx.stable_crate_id(LOCAL_CRATE).as_u64();
+    if let Some(recorded) = store.crate_id_mismatch(&crate_name, crate_id) {
+        tcx.dcx().warn(format!(
+            "verifopt: {} was analyzed as crate id {recorded:016x}, but this build of `{crate_name}` \
+             is {crate_id:016x}: the store doesn't match this build (different profile, features, \
+             flags or toolchain - or a different target of the same crate), so none of its rewrites \
+             for this crate will apply. Re-run the analysis with the same configuration.",
+            rustc_verifopt::store_path().display()
+        ));
+    }
+
+    // Site-containing function -> the targets of all its sites.
+    let mut site_targets: FxHashMap<DefPathHash, FxHashSet<DefPathHash>> = FxHashMap::default();
+    for ((caller, _, _), targets) in &store.targets {
+        site_targets.entry(*caller).or_default().extend(targets.iter().map(|(t, _)| *t));
+    }
+    for ((caller, _, _), sites) in &store.tags {
+        site_targets.entry(*caller).or_default().extend(sites.iter().map(|(_, _, _, t, _)| *t));
+    }
+    if site_targets.is_empty() {
+        return;
+    }
+    let all_targets: FxHashSet<DefPathHash> = site_targets.values().flatten().copied().collect();
+
+    // Index this crate's mono items by DefPathHash, in collection order.
+    let mut callers: Vec<(MonoItem<'tcx>, DefPathHash)> = Vec::new();
+    let mut target_items: FxHashMap<DefPathHash, Vec<MonoItem<'tcx>>> = FxHashMap::default();
+    for item in items {
+        let MonoItem::Fn(instance) = item else { continue };
+        let hash = tcx.def_path_hash(instance.def_id());
+        if site_targets.contains_key(&hash) {
+            callers.push((*item, hash));
+        }
+        if all_targets.contains(&hash) {
+            target_items.entry(hash).or_default().push(*item);
+        }
+    }
+
+    let mut added = 0usize;
+    for (caller, hash) in &callers {
+        let mut targets: Vec<DefPathHash> = site_targets[hash].iter().copied().collect();
+        targets.sort();
+        for target in targets {
+            for target_item in target_items.get(&target).map(Vec::as_slice).unwrap_or(&[]) {
+                if target_item != caller {
+                    usage_map.record_extra_use(*caller, *target_item);
+                    added += 1;
+                }
+            }
+        }
+    }
+    debug!(
+        "[verifopt] added {added} rewrite uses for {} site-containing instances in `{crate_name}`",
+        callers.len()
+    );
+}
+
 fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> MonoItemPartitions<'_> {
     let collection_strategy = if tcx.sess.link_dead_code() {
         MonoItemCollectionStrategy::Eager
@@ -1135,7 +1236,8 @@ fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> MonoItemPartitio
         MonoItemCollectionStrategy::Lazy
     };
 
-    let (items, usage_map) = collector::collect_crate_mono_items(tcx, collection_strategy);
+    let (items, mut usage_map) = collector::collect_crate_mono_items(tcx, collection_strategy);
+    add_verifopt_rewrite_uses(tcx, &items, &mut usage_map);
     // Perform checks that need to operate on the entire mono item graph
     target_specific_checks(tcx, &items, &usage_map);
 

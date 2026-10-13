@@ -24,6 +24,42 @@ pub struct Store {
     pub tags: FxHashMap<SiteKey, Vec<TagSite>>,
     /// Every sentinel hash referenced above, with the shape it came from.
     pub shapes: FxHashMap<DefPathHash, ArgShape>,
+    /// Name -> stable crate id of every crate containing a stored site, as
+    /// the analysis saw it. Every DefPathHash in the keys starts with its
+    /// crate's stable crate id, which cargo derives (via `-C metadata`) from
+    /// the package *and the build profile, features, ...*. So if a crate of
+    /// this name is compiled with a different id, the store came from a
+    /// differently configured build and none of its keys can match - which
+    /// otherwise fails silently. See `crate_id_mismatch`.
+    pub crates: FxHashMap<String, u64>,
+}
+
+/// Where the analysis writes the store and the rewrite reads it:
+/// `$VERIFOPT_STORE_DIR/verifopt_store.json`, else
+/// `verifopt_results/verifopt_store.json` (cargo-verifopt always sets the
+/// variable for the rustc processes it starts).
+pub fn store_path() -> std::path::PathBuf {
+    match std::env::var_os("VERIFOPT_STORE_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir).join("verifopt_store.json"),
+        None => std::path::PathBuf::from("verifopt_results").join("verifopt_store.json"),
+    }
+}
+
+/// Reads and parses the store at `store_path()`.
+pub fn load_store() -> Result<Store, String> {
+    let path = store_path();
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    Store::from_json(&contents).map_err(|e| format!("could not parse {}: {e}", path.display()))
+}
+
+impl Store {
+    /// If the store has sites in a crate named `crate_name` but recorded it
+    /// with a different stable crate id than `crate_id` (this compilation's),
+    /// returns the recorded id: the store doesn't describe this build.
+    pub fn crate_id_mismatch(&self, crate_name: &str, crate_id: u64) -> Option<u64> {
+        self.crates.get(crate_name).copied().filter(|recorded| *recorded != crate_id)
+    }
 }
 
 type SerKey = (HashBytes, usize, Vec<HashBytes>);
@@ -34,6 +70,8 @@ struct SerStore {
     tags: Vec<(SerKey, Vec<(usize, usize, u64, HashBytes, Option<Vec<HashBytes>>)>)>,
     #[serde(default)]
     shapes: Vec<(HashBytes, ArgShape)>,
+    #[serde(default)]
+    crates: Vec<(String, u64)>,
 }
 
 fn ser_vec(v: &[DefPathHash]) -> Vec<HashBytes> {
@@ -83,6 +121,7 @@ impl Store {
                 })
                 .collect(),
             shapes: self.shapes.iter().map(|(h, s)| (HashBytes::from(*h), s.clone())).collect(),
+            crates: self.crates.iter().map(|(n, id)| (n.clone(), *id)).collect(),
         };
         serde_json::to_string(&ser).map_err(|e| e.to_string())
     }
@@ -115,6 +154,7 @@ impl Store {
                 })
                 .collect(),
             shapes: ser.shapes.into_iter().map(|(h, s)| (DefPathHash::from(h), s)).collect(),
+            crates: ser.crates.into_iter().collect(),
         })
     }
 }
