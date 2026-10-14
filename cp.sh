@@ -104,6 +104,57 @@ for src in "$SRC_HOST" "$SRC_TARGET"; do
 done
 echo "  done ($total_rmeta .rmeta, $total_so .so total)"
 
+# Keep only the *current* build of each rustc_* crate in the sysroot.
+#
+# Cargo never deletes old artifacts from deps/, so whenever a change alters
+# the compiler's crate graph (adding a dependency to a rustc_* crate, a new
+# compiler crate, ...), the affected crates get new hashes and the old ones
+# stay behind - and the blanket copy above puts them back into the sysroot.
+# That's harmless for crates found *through* other crates' metadata (which
+# names the exact hash), but not for crates loaded *by name*: a
+# rustc_private tool's `extern crate rustc_driver;` then fails with
+# "multiple candidates for dylib dependency rustc_driver" (E0464).
+#
+# Only the compiler's own workspace crates are pruned - those with a
+# directory under compiler/ (rustc_driver, rustc_middle, ...): a build has
+# exactly one of each, so any other hash is stale. Everything else is left
+# alone, whatever its name: third-party crates can legitimately exist in
+# several versions at once (resolved by hash) - including some named rustc_*,
+# like rustc_hash (the crates.io rustc-hash crate) - and the standard
+# library's own dependencies (e.g. its libc) must never be touched, since
+# std's metadata names their exact hash. "Current" = newest modification time in the build
+# directory (actual build time; mtimes in the sysroot are just copy times).
+echo
+echo "Pruning stale rustc_* builds from the sysroot ..."
+pruned=0
+# (find rather than ls, and `|| true`: under `set -euo pipefail` a glob that
+# matches nothing - e.g. no .rlib files - would otherwise abort the script.)
+for crate in $( (find "$SYSROOT_LIB" -maxdepth 1 -name 'librustc_*-*' \
+                   \( -name '*.rmeta' -o -name '*.rlib' -o -name '*.so' \) -printf '%f\n' || true) \
+                 | sed -E 's/-[0-9a-f]{16}\.(rlib|rmeta|so)$//' | sort -u); do
+    # A compiler workspace crate? (librustc_driver -> compiler/rustc_driver)
+    [ -d "$RUST_ROOT/compiler/${crate#lib}" ] || continue
+    hashes="$( (find "$SYSROOT_LIB" -maxdepth 1 -name "$crate-*" -printf '%f\n' || true) \
+               | grep -E "^$crate-[0-9a-f]{16}\." | sed -E 's/.*-([0-9a-f]{16})\..*/\1/' | sort -u || true)"
+    [ -n "$hashes" ] || continue
+    [ "$(echo "$hashes" | wc -l)" -gt 1 ] || continue
+    newest="$( (ls -t "$SRC_HOST/$crate"-*.rmeta "$SRC_HOST/$crate"-*.so \
+                     "$SRC_TARGET/$crate"-*.rmeta "$SRC_TARGET/$crate"-*.so 2>/dev/null || true) \
+               | grep -E "/$crate-[0-9a-f]{16}\." | head -1 | sed -E 's/.*-([0-9a-f]{16})\..*/\1/' || true)"
+    if [ -z "$newest" ]; then
+        echo "  WARNING: $crate has several builds in the sysroot but none in the build dirs - left as is" >&2
+        continue
+    fi
+    for h in $hashes; do
+        if [ "$h" != "$newest" ]; then
+            rm -f "$SYSROOT_LIB/$crate-$h".*
+            echo "  removed $crate-$h (kept $newest)"
+            pruned=$((pruned + 1))
+        fi
+    done
+done
+echo "  done ($pruned stale build(s) removed)"
+
 echo
 echo "Done. Sysroot populated at: $SYSROOT_LIB"
 echo "(re-run this script after any ./x.py build/check invocation, since" \
