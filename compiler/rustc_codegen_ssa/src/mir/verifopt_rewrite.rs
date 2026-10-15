@@ -7,6 +7,7 @@ use rustc_middle::mir::{
     LocalDecl, Mutability, Operand, Place, ProjectionElem, Rvalue, SourceInfo, Statement,
     StatementKind, SwitchTargets, Terminator, TerminatorKind, UnOp,
 };
+use rustc_middle::mir::{InlineAsmOperand, START_BLOCK};
 use rustc_span::def_id::{DefPathHash, LOCAL_CRATE};
 use rustc_hir::LangItem;
 use rustc_hir::attrs::Linkage;
@@ -484,7 +485,14 @@ fn apply_edits<'tcx>(
                     Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => {
                         let preds = default.basic_blocks.predecessors();
                         let found =
-                            find_casts(&bbs, preds, bb_idx, p.local, &mut HashSet::default());
+                            find_casts(
+                                &bbs,
+                                preds,
+                                bb_idx,
+                                p.local,
+                                Some(bbs[bb].statements.len()),
+                                &mut HashSet::default(),
+                            );
                         let planned: HashSet<(usize, usize)> =
                             sites.iter().map(|(bb, stmt, _, _, _)| (*bb, *stmt)).collect();
                         found.as_ref() == Some(&planned)
@@ -778,9 +786,9 @@ fn apply_edits<'tcx>(
                     }
                 }
                 // `n` candidates, each a direct call guarded by a vtable-slot
-                // comparison; every Pointers rewrite keeps the original dyn
-                // call as the fallback when none matches.
-                log_edit_kind(&format!("pointers n={n} fallback=yes"));
+                // comparison. (Every Pointers rewrite also keeps the original
+                // dyn call as the fallback when none matches.)
+                log_edit_kind(&format!("pointers n={n}"));
             }
 
             Plan::Tagged(sites) => {
@@ -791,7 +799,14 @@ fn apply_edits<'tcx>(
 
                 let preds = default.basic_blocks.predecessors();
 
-                let found = find_casts(&bbs, preds, bb_idx, recv_local, &mut HashSet::default());
+                let found = find_casts(
+                    &bbs,
+                    preds,
+                    bb_idx,
+                    recv_local,
+                    Some(bbs[bb].statements.len()),
+                    &mut HashSet::default(),
+                );
 
                 let planned: HashSet<(usize, usize)> = sites
                     .iter()
@@ -813,7 +828,13 @@ fn apply_edits<'tcx>(
 
                 let tag_local = body.local_decls.push(LocalDecl::new(tcx.types.usize, span));
 
-                for (bb_idx, stmt_idx, tag, _, _) in &sites {
+                // Insert each tag assignment right after its cast. Latest
+                // position first, so an insertion never shifts the index of a
+                // cast still to be handled in the same block.
+                let mut tag_sites: Vec<(usize, usize, u64)> =
+                    sites.iter().map(|(b, i, t, _, _)| (*b, *i, *t)).collect();
+                tag_sites.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+                for (bb_idx, stmt_idx, tag) in &tag_sites {
                     let cb = BasicBlock::from_usize(*bb_idx);
 
                     bbs[cb].statements.insert(
@@ -832,6 +853,28 @@ fn apply_edits<'tcx>(
                     );
                 }
 
+                // Defence in depth: start the tag at a value no arm uses, at
+                // function entry. find_casts only accepts the site if every path
+                // to the dispatch passes one of the casts above, but if a path
+                // were ever missed, the switch below would read this sentinel and
+                // take the original dyn call - instead of reading an
+                // uninitialized local, which would be undefined behaviour.
+                let no_tag = tcx.data_layout.pointer_size().unsigned_int_max() as u64;
+                bbs[START_BLOCK].statements.insert(
+                    0,
+                    Statement::new(
+                        source_info,
+                        StatementKind::Assign(Box::new((
+                            Place::from(tag_local),
+                            Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
+                                span,
+                                user_ty: None,
+                                const_: Const::from_usize(tcx, no_tag),
+                            }))),
+                        ))),
+                    ),
+                );
+
                 let is_cleanup = bbs[bb].is_cleanup;
                 let mut orig = bbs[bb].terminator().clone();
                 if let TerminatorKind::Call { target: t, .. } = &mut orig.kind {
@@ -840,8 +883,16 @@ fn apply_edits<'tcx>(
                 let fallback = bbs.push(BasicBlockData::new_stmts(vec![], Some(orig), false));
 
                 let mut arms = Vec::new();
+                // One arm per *tag*, not per cast site: the analysis gives each
+                // implementation one tag, so several casts to the same type
+                // share it - and a switch with duplicate values is invalid MIR
+                // (and an invalid LLVM `switch`).
+                let mut tags_with_arm: HashSet<u64> = HashSet::default();
 
                 for (_, _, tag, impl_hash, self_hash) in &sites {
+                    if !tags_with_arm.insert(*tag) {
+                        continue;
+                    }
                     let (fnc, self_ty) =
                         match fn_op(tcx, defid, *impl_hash, self_hash.clone(), gen_args, span) {
                             Ok(v) => v,
@@ -881,6 +932,9 @@ fn apply_edits<'tcx>(
                     arms.push((*tag as u128, cb));
                 }
 
+                // One direct call per arm; any other tag value (including the
+                // entry sentinel) takes the original dyn call.
+                let n = arms.len();
                 bbs[bb].terminator = Some(Terminator {
                     source_info,
                     kind: TerminatorKind::SwitchInt {
@@ -888,7 +942,7 @@ fn apply_edits<'tcx>(
                         targets: SwitchTargets::new(arms.into_iter(), fallback),
                     },
                 });
-                log_edit_kind("tagged");
+                log_edit_kind(&format!("tagged n={n}"));
             }
         }
     }
@@ -1583,6 +1637,43 @@ fn narrow_dyn<'tcx>(
     (out, stmts)
 }
 
+/// Whether `term` writes `local` itself - not just through a pointer stored
+/// in it: a call's destination, an inline-asm output, a yield's resume arg.
+fn terminator_writes(term: &Terminator<'_>, local: Local) -> bool {
+    let writes = |p: &Place<'_>| {
+        p.local == local && p.projection.first() != Some(&ProjectionElem::Deref)
+    };
+    match &term.kind {
+        TerminatorKind::Call { destination, .. } => writes(destination),
+        TerminatorKind::InlineAsm { operands, .. } => operands.iter().any(|op| match op {
+            InlineAsmOperand::Out { place: Some(p), .. }
+            | InlineAsmOperand::InOut { out_place: Some(p), .. } => writes(p),
+            _ => false,
+        }),
+        TerminatorKind::Yield { resume_arg, .. } => writes(resume_arg),
+        _ => false,
+    }
+}
+
+/// The cast sites (block, statement index) that can have produced `local`'s
+/// value at a point in block `bb_idx`: before statement `before`, or - with
+/// `before == None` - at the end of the block, after its terminator.
+///
+/// Walks definitions backwards: an Unsize coercion is a cast site; a plain
+/// copy/move continues with its source, from that statement's position; any
+/// other definition - another rvalue, a projected write into the local, a
+/// SetDiscriminant, or a terminator writing it (a call's destination, an
+/// inline-asm output, a yield's resume arg) - means the value's origin isn't
+/// a known cast, so the whole search is None. So is reaching the function's
+/// entry without a definition (an argument). Revisiting a (block, local,
+/// position) - a loop - contributes nothing new.
+///
+/// A Tagged rewrite is only valid if every path to the dispatch passes one of
+/// the returned casts. Previously terminators weren't checked at all, so a
+/// call that replaced the receiver after a cast went unnoticed (the switch
+/// would then have used that cast's stale tag); and following a copy rescanned
+/// its whole block, so a later redefinition of the copy's source in that block
+/// could be mistaken for its origin.
 // The only thing done with this result is a set-equality check, which only
 // depends on set membership - completely unaffected by iteration or insertion order.
 #[allow(rustc::potential_query_instability)]
@@ -1591,32 +1682,53 @@ fn find_casts<'tcx>(
     preds: &IndexVec<BasicBlock, SmallVec<[BasicBlock; 4]>>,
     bb_idx: usize,
     local: Local,
-    seen: &mut HashSet<(usize, Local)>,
+    before: Option<usize>,
+    seen: &mut HashSet<(usize, Local, Option<usize>)>,
 ) -> Option<HashSet<(usize, usize)>> {
-    if !seen.insert((bb_idx, local)) {
+    if !seen.insert((bb_idx, local, before)) {
         return Some(HashSet::default());
     }
 
     let bb = BasicBlock::from_usize(bb_idx);
+    let data = &bbs[bb];
 
-    for (i, stmt) in bbs[bb].statements.iter().enumerate().rev() {
-        let StatementKind::Assign(b) = &stmt.kind else {
-            continue;
-        };
-        let (p, rv) = *b.clone();
-        if p.local != local || !p.projection.is_empty() {
-            continue;
+    // Searching from the end of a block: its terminator is the last place it
+    // could define `local`.
+    if before.is_none() && data.terminator.as_ref().is_some_and(|t| terminator_writes(t, local)) {
+        return None;
+    }
+
+    let end = before.unwrap_or(data.statements.len()).min(data.statements.len());
+    for (i, stmt) in data.statements[..end].iter().enumerate().rev() {
+        match &stmt.kind {
+            StatementKind::Assign(b) => {
+                let (p, rv) = &**b;
+                if p.local != local || p.projection.first() == Some(&ProjectionElem::Deref) {
+                    // Another local, or a write *through* the pointer in it.
+                    continue;
+                }
+                if !p.projection.is_empty() {
+                    // A partial write into the local itself.
+                    return None;
+                }
+                return match rv {
+                    Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::Unsize, ..), ..) => {
+                        Some([(bb_idx, i)].into_iter().collect())
+                    }
+                    Rvalue::Use(Operand::Copy(q) | Operand::Move(q)) if q.projection.is_empty() => {
+                        find_casts(bbs, preds, bb_idx, q.local, Some(i), seen)
+                    }
+                    _ => None,
+                };
+            }
+            StatementKind::SetDiscriminant { place, .. }
+                if place.local == local
+                    && place.projection.first() != Some(&ProjectionElem::Deref) =>
+            {
+                return None;
+            }
+            _ => {}
         }
-
-        return match rv {
-            Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::Unsize, ..), ..) => {
-                Some([(bb_idx, i)].into_iter().collect())
-            }
-            Rvalue::Use(Operand::Copy(q) | Operand::Move(q)) if q.projection.is_empty() => {
-                find_casts(bbs, preds, bb_idx, q.local, seen)
-            }
-            _ => None,
-        };
     }
 
     let ps = &preds[bb];
@@ -1626,7 +1738,7 @@ fn find_casts<'tcx>(
 
     let mut out = HashSet::default();
     for p in ps {
-        out.extend(find_casts(bbs, preds, p.index(), local, seen)?);
+        out.extend(find_casts(bbs, preds, p.index(), local, None, seen)?);
     }
 
     Some(out)
