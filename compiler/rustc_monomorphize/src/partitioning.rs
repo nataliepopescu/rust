@@ -1128,33 +1128,6 @@ where
     }
 }
 
-/// Tells partitioning about the calls verifopt's rewrite will add.
-///
-/// The rewrite (rustc_codegen_ssa's verifopt_rewrite) turns a dynamic dispatch
-/// into direct calls to its targets during *codegen*, after partitioning has
-/// already decided, from the collector's view of the *original* MIR, which
-/// codegen unit each instance lives in, whether it gets internal linkage, and
-/// which units get their own copy of an inline (LocalCopy) item. None of
-/// that accounts for the new calls, so a target could end up internal in a
-/// different unit than the dispatching function - unreferenceable from it, so
-/// the rewrite's linkability check (correctly) skipped the site. That's what
-/// left e.g. ripgrep's `rg::search`/`rg::files` loops unrewritten with the
-/// default 16 codegen units.
-///
-/// So: for every function with stored dispatch sites, record "caller uses
-/// target" for each instance of each of its sites' targets, as the collector
-/// would have for a direct call. Partitioning then keeps such targets
-/// referenceable from the caller's unit (not internal, or a local copy
-/// there). This over-approximates harmlessly: it ignores which instance of a
-/// generic caller has the site, and adds every instance of a target - extra
-/// edges can only prevent internalization or add a copy, never break code.
-///
-/// Also warns when the store was clearly produced for a differently
-/// configured build of this crate (Store::crate_id_mismatch), which otherwise
-/// shows up only as a silent absence of rewrites.
-// Map iteration below only builds sets/lookup tables; every edge is added in
-// the (deterministic) collection order of `items`, with targets sorted.
-#[allow(rustc::potential_query_instability)]
 /// Writes this crate's instance manifest (rustc_verifopt::InstanceManifest):
 /// every instance it compiles of a trait method implementation, a trait
 /// default method, or a closure - the instances a dynamic dispatch can reach.
@@ -1202,6 +1175,33 @@ fn write_verifopt_instance_manifest<'tcx>(tcx: TyCtxt<'tcx>, items: &[MonoItem<'
     }
 }
 
+/// Tells partitioning about the calls verifopt's rewrite will add.
+///
+/// The rewrite (rustc_codegen_ssa's verifopt_rewrite) turns a dynamic dispatch
+/// into direct calls to its targets during *codegen*, after partitioning has
+/// already decided, from the collector's view of the *original* MIR, which
+/// codegen unit each instance lives in, whether it gets internal linkage, and
+/// which units get their own copy of an inline (LocalCopy) item. None of
+/// that accounts for the new calls, so a target could end up internal in a
+/// different unit than the dispatching function - unreferenceable from it, so
+/// the rewrite's linkability check (correctly) skipped the site. That's what
+/// left e.g. ripgrep's `rg::search`/`rg::files` loops unrewritten with the
+/// default 16 codegen units.
+///
+/// So: for every function with stored dispatch sites, record "caller uses
+/// target" for each instance of each of its sites' targets, as the collector
+/// would have for a direct call. Partitioning then keeps such targets
+/// referenceable from the caller's unit (not internal, or a local copy
+/// there). This over-approximates harmlessly: it ignores which instance of a
+/// generic caller has the site, and adds every instance of a target - extra
+/// edges can only prevent internalization or add a copy, never break code.
+///
+/// Also warns when the store was clearly produced for a differently
+/// configured build of this crate (Store::crate_id_mismatch), which otherwise
+/// shows up only as a silent absence of rewrites.
+// Map iteration below only builds sets/lookup tables; every edge is added in
+// the (deterministic) collection order of `items`, with targets sorted.
+#[allow(rustc::potential_query_instability)]
 fn add_verifopt_rewrite_uses<'tcx>(
     tcx: TyCtxt<'tcx>,
     items: &[MonoItem<'tcx>],
