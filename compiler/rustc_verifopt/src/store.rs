@@ -39,9 +39,15 @@ pub struct Store {
 /// `verifopt_results/verifopt_store.json` (cargo-verifopt always sets the
 /// variable for the rustc processes it starts).
 pub fn store_path() -> std::path::PathBuf {
+    results_dir().join("verifopt_store.json")
+}
+
+/// The run's results directory: `$VERIFOPT_STORE_DIR` (cargo-verifopt always
+/// sets it for the rustc processes it starts), else `verifopt_results`.
+pub fn results_dir() -> std::path::PathBuf {
     match std::env::var_os("VERIFOPT_STORE_DIR") {
-        Some(dir) => std::path::PathBuf::from(dir).join("verifopt_store.json"),
-        None => std::path::PathBuf::from("verifopt_results").join("verifopt_store.json"),
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::path::PathBuf::from("verifopt_results"),
     }
 }
 

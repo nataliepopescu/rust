@@ -777,7 +777,10 @@ fn apply_edits<'tcx>(
                         ));
                     }
                 }
-                log_edit_kind("pointers");
+                // `n` candidates, each a direct call guarded by a vtable-slot
+                // comparison; every Pointers rewrite keeps the original dyn
+                // call as the fallback when none matches.
+                log_edit_kind(&format!("pointers n={n} fallback=yes"));
             }
 
             Plan::Tagged(sites) => {

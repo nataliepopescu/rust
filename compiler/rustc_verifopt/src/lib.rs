@@ -16,6 +16,7 @@
 //! both sides go through [`Store::to_json`]/[`Store::from_json`] instead.
 
 mod hash;
+mod manifest;
 mod shape;
 mod store;
 
@@ -24,4 +25,5 @@ pub use shape::{
     ArgShape, HashBytes, PredShape, ShapeRegistry, TyShape, arg_from_hash, arg_from_shape, arg_to_shape,
     def_id_from_hash, ty_from_shape, ty_to_shape,
 };
-pub use store::{SiteKey, Store, TagSite, Target, load_store, store_path};
+pub use manifest::{InstanceManifest, manifest_dir};
+pub use store::{SiteKey, Store, TagSite, Target, load_store, results_dir, store_path};

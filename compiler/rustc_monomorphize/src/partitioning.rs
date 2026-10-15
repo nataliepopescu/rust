@@ -1155,6 +1155,53 @@ where
 // Map iteration below only builds sets/lookup tables; every edge is added in
 // the (deterministic) collection order of `items`, with targets sorted.
 #[allow(rustc::potential_query_instability)]
+/// Writes this crate's instance manifest (rustc_verifopt::InstanceManifest):
+/// every instance it compiles of a trait method implementation, a trait
+/// default method, or a closure - the instances a dynamic dispatch can reach.
+/// The analysis unions all crates' manifests into "CHAmax", the whole-program
+/// maximum set of instances behind each site's CHA candidates. Only under
+/// cargo-verifopt (which sets VERIFOPT_STORE_DIR); errors are ignored, since
+/// a missing manifest only makes CHAmax "incomplete".
+fn write_verifopt_instance_manifest<'tcx>(tcx: TyCtxt<'tcx>, items: &[MonoItem<'tcx>]) {
+    use rustc_data_structures::fx::FxHashSet;
+    use rustc_hir::def::DefKind;
+
+    if std::env::var_os("VERIFOPT_STORE_DIR").is_none() {
+        return;
+    }
+    let scratch_shapes = rustc_verifopt::ShapeRegistry::new();
+    let mut seen = FxHashSet::default();
+    let mut instances = Vec::new();
+    for item in items {
+        let MonoItem::Fn(instance) = item else { continue };
+        let InstanceKind::Item(did) = instance.def else { continue };
+        let dispatchable = tcx.is_closure_like(did)
+            || (matches!(tcx.def_kind(did), DefKind::AssocFn)
+                && (tcx.associated_item(did).trait_item_def_id().is_some()
+                    || tcx.trait_of_assoc(did).is_some()));
+        if !dispatchable {
+            continue;
+        }
+        let entry = (
+            tcx.def_path_hash(did),
+            rustc_verifopt::hash_args(tcx, instance.args, &scratch_shapes),
+        );
+        if seen.insert(entry.clone()) {
+            instances.push(entry);
+        }
+    }
+    let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
+    let crate_id = tcx.stable_crate_id(LOCAL_CRATE).as_u64();
+    let manifest = rustc_verifopt::InstanceManifest { crate_name: crate_name.clone(), crate_id, instances };
+    let dir = rustc_verifopt::manifest_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{crate_name}-{crate_id:016x}.json"));
+    match manifest.to_json().map(|json| std::fs::write(&path, json)) {
+        Ok(Ok(())) => debug!("[verifopt] wrote {} manifest instances to {}", manifest.instances.len(), path.display()),
+        other => debug!("[verifopt] could not write {}: {:?}", path.display(), other),
+    }
+}
+
 fn add_verifopt_rewrite_uses<'tcx>(
     tcx: TyCtxt<'tcx>,
     items: &[MonoItem<'tcx>],
@@ -1237,6 +1284,7 @@ fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> MonoItemPartitio
     };
 
     let (items, mut usage_map) = collector::collect_crate_mono_items(tcx, collection_strategy);
+    write_verifopt_instance_manifest(tcx, &items);
     add_verifopt_rewrite_uses(tcx, &items, &mut usage_map);
     // Perform checks that need to operate on the entire mono item graph
     target_specific_checks(tcx, &items, &usage_map);
