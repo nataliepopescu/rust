@@ -49,6 +49,7 @@ no_llvm_build
 /mingw-build/
 /build
 /build-rust-analyzer
+/build_cp
 /dist/
 /unicode-downloads
 /target
