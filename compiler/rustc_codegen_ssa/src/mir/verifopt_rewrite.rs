@@ -249,6 +249,7 @@ static SHAPES: ShapeRegistry = ShapeRegistry::new();
 #[allow(rustc::potential_query_instability)]
 fn compute_edits<'tcx>(
     tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
     store: &Store,
     hash: DefPathHash,
     caller_genargs: ty::GenericArgsRef<'tcx>,
@@ -307,6 +308,18 @@ fn compute_edits<'tcx>(
             } else if targets.len() > 1 && targets.len() <= max_pointers_candidates() {
                 // direct conditionals on pointers
                 Some((bb.as_usize(), Edit::Pointers(targets.to_vec())))
+            } else if targets.len() > max_pointers_candidates() {
+                // Too many targets for a Pointers rewrite: left as the dyn call.
+                // Recorded, so the cost of the limit (--max-candidates) is visible.
+                log_skip(
+                    tcx,
+                    instance,
+                    bb,
+                    "too_many_targets",
+                    &format!("{} targets > max {}", targets.len(), max_pointers_candidates()),
+                );
+                log_edit_kind(&format!("skipped too_many_targets n={}", targets.len()));
+                None
             } else {
                 // leave vtable dyn call
                 None
@@ -357,7 +370,9 @@ enum Plan<'tcx> {
     /// edit-kind label to log ("single", or "single exact" for a target proven
     /// single by CHAmax).
     Single(Operand<'tcx>, Ty<'tcx>, &'static str),
-    Pointers(Vec<Cand<'tcx>>),
+    /// The candidates to compare against, and how many were found before
+    /// truncation to max_pointers_candidates().
+    Pointers(Vec<Cand<'tcx>>, usize),
     Tagged(Vec<(usize, usize, u64, DefPathHash, Option<Vec<DefPathHash>>)>),
 }
 
@@ -486,8 +501,9 @@ fn apply_edits<'tcx>(
             log_skip(tcx, instance, bb, reason, why);
         };
         let pointers_plan = |targets: &[(DefPathHash, Option<Vec<DefPathHash>>)]| -> Result<Plan<'tcx>, String> {
-            let cands = linkable.pointer_candidates(instance, bb, defid, gen_args, span, targets)?;
-            Ok(Plan::Pointers(cands))
+            let (cands, found) =
+                linkable.pointer_candidates(instance, bb, defid, gen_args, span, targets)?;
+            Ok(Plan::Pointers(cands, found))
         };
         let plan = match edit {
             Edit::Single(hash, self_hash) => {
@@ -587,7 +603,7 @@ fn apply_edits<'tcx>(
                 }
             }
 
-            Plan::Pointers(cands) => {
+            Plan::Pointers(cands, found) => {
                 let _ = CRATE_NAME.get_or_init(|| tcx.crate_name(LOCAL_CRATE).to_string());
 
                 let op = args[0].node.clone();
@@ -816,7 +832,13 @@ fn apply_edits<'tcx>(
                 // `n` candidates, each a direct call guarded by a vtable-slot
                 // comparison. (Every Pointers rewrite also keeps the original
                 // dyn call as the fallback when none matches.)
-                log_edit_kind(&format!("pointers n={n}"));
+                // When the list was truncated to max_pointers_candidates(),
+                // `of=` says how many there were: the rest take the fallback.
+                if found > n {
+                    log_edit_kind(&format!("pointers n={n} of={found}"));
+                } else {
+                    log_edit_kind(&format!("pointers n={n}"));
+                }
             }
 
             Plan::Tagged(sites) => {
@@ -1256,7 +1278,7 @@ impl<'tcx> Linkable<'tcx> {
         gen_args: &'tcx List<GenericArg<'tcx>>,
         span: Span,
         targets: &[(DefPathHash, Option<Vec<DefPathHash>>)],
-    ) -> Result<Vec<Cand<'tcx>>, String> {
+    ) -> Result<(Vec<Cand<'tcx>>, usize), String> {
         let mut cands: Vec<Cand<'tcx>> = Vec::new();
         let mut dropped: Vec<String> = Vec::new();
         for (hash, self_hashes) in targets {
@@ -1286,6 +1308,7 @@ impl<'tcx> Linkable<'tcx> {
                 dropped.first().map(String::as_str).unwrap_or("no targets")
             ));
         }
+        let found = cands.len();
         let max = max_pointers_candidates();
         if cands.len() > max {
             debug!(
@@ -1297,7 +1320,7 @@ impl<'tcx> Linkable<'tcx> {
             );
             cands.truncate(max);
         }
-        Ok(cands)
+        Ok((cands, found))
     }
 
     /// Resolves every target of a site the way codegen will, and checks each
@@ -1855,7 +1878,7 @@ pub(super) fn rewrite_monomorphized<'tcx>(
         tcx.crate_name(instance.def_id().krate),
     );
     let edits = match SHARED_STORE.get_or_init(load_shared_store) {
-        Some(shared) => compute_edits(tcx, shared, hash, instance.args, &monomorphized_mir),
+        Some(shared) => compute_edits(tcx, instance, shared, hash, instance.args, &monomorphized_mir),
         None => return monomorphized_mir,
     };
     if !edits.is_empty() {
