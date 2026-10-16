@@ -214,6 +214,9 @@ fn dump_body<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, body: &Body<'tcx
 
 enum Edit {
     Single(DefPathHash, Option<Vec<DefPathHash>>),
+    /// A provably single target given as an exact instance (Store::exact):
+    /// the function and its own generic args.
+    SingleExact(DefPathHash, Vec<DefPathHash>),
     Pointers(Vec<(DefPathHash, Option<Vec<DefPathHash>>)>),
     Tagged(Vec<(usize, usize, u64, DefPathHash, Option<Vec<DefPathHash>>)>),
 }
@@ -275,7 +278,13 @@ fn compute_edits<'tcx>(
             let tags = store.tags.get(key);
             let targets = store.targets.get(key)?;
 
-            if targets.len() == 1 {
+            if targets.len() == 1
+                && store.exact.contains(key)
+                && let Some(args) = &targets[0].1
+            {
+                // a provably single target, given as an exact instance
+                Some((bb.as_usize(), Edit::SingleExact(targets[0].0, args.clone())))
+            } else if targets.len() == 1 {
                 // directly swap terminator
                 Some((bb.as_usize(), Edit::Single(targets[0].0, targets[0].1.clone())))
             } else if let Some(tags) = tags {
@@ -330,7 +339,10 @@ struct Cand<'tcx> {
 /// What apply_edits actually emits for a site, decided before touching the
 /// body (see the comment above the `plan` computation).
 enum Plan<'tcx> {
-    Single(DefPathHash, Option<Vec<DefPathHash>>),
+    /// One direct call: the callee, the receiver's concrete Self type, and the
+    /// edit-kind label to log ("single", or "single exact" for a target proven
+    /// single by CHAmax).
+    Single(Operand<'tcx>, Ty<'tcx>, &'static str),
     Pointers(Vec<Cand<'tcx>>),
     Tagged(Vec<(usize, usize, u64, DefPathHash, Option<Vec<DefPathHash>>)>),
 }
@@ -466,10 +478,16 @@ fn apply_edits<'tcx>(
         let plan = match edit {
             Edit::Single(hash, self_hash) => {
                 match linkable.check_site(defid, gen_args, span, &[(hash, self_hash.clone())], false) {
-                    Ok(()) => Ok(Plan::Single(hash, self_hash)),
+                    Ok(()) => match fn_op(tcx, defid, hash, self_hash.clone(), gen_args, span) {
+                        Ok((fnc, self_ty)) => Ok(Plan::Single(fnc, self_ty, "single")),
+                        Err(()) => Err(format!("target {hash:?} could not be resolved")),
+                    },
                     Err(why) => pointers_plan(&[(hash, self_hash)]).map_err(|_| why),
                 }
             }
+            Edit::SingleExact(hash, arg_hashes) => linkable
+                .exact_candidate(defid, span, hash, &arg_hashes)
+                .map(|c| Plan::Single(c.fnc, c.self_ty, "single exact")),
             Edit::Pointers(targets) => pointers_plan(&targets),
             Edit::Tagged(sites) => {
                 let targets: Vec<(DefPathHash, Option<Vec<DefPathHash>>)> = {
@@ -530,11 +548,7 @@ fn apply_edits<'tcx>(
         };
 
         match plan {
-            Plan::Single(hash, self_hash) => {
-                let (fnc, self_ty) = match fn_op(tcx, defid, hash, self_hash, gen_args, span) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+            Plan::Single(fnc, self_ty, kind) => {
 
                 let (recv, new_stmts) = narrow_dyn(
                     tcx,
@@ -555,7 +569,7 @@ fn apply_edits<'tcx>(
                 {
                     *func = fnc;
                     *a = new_args;
-                    log_edit_kind("single");
+                    log_edit_kind(kind);
                 }
             }
 
@@ -1136,6 +1150,65 @@ impl<'tcx> Linkable<'tcx> {
             out.len()
         );
         Ok(out)
+    }
+
+    /// The exact instance a Store::exact site names: the function and its own
+    /// generic args, built as is (no trait-based resolution - that reads
+    /// recorded args as the Self ADT's, which an instance's own args aren't),
+    /// then subjected to the same checks as any target: it implements the
+    /// dispatched method, resolves to exactly that function, and is linkable.
+    fn exact_candidate(
+        &self,
+        orig_callee: DefId,
+        span: Span,
+        hash: DefPathHash,
+        arg_hashes: &[DefPathHash],
+    ) -> Result<Cand<'tcx>, String> {
+        let tcx = self.tcx;
+        let env = TypingEnv::fully_monomorphized();
+        let Some(did) = def_id_from_hash(tcx, hash) else {
+            return Err(format!("target {hash:?} could not be resolved"));
+        };
+        if !implements_dispatched_method(tcx, did, orig_callee) {
+            return Err(format!(
+                "target {did:?} does not implement the dispatched method {orig_callee:?}"
+            ));
+        }
+        let Some(args) = arg_hashes
+            .iter()
+            .map(|h| arg_from_hash(tcx, *h, &SHAPES))
+            .collect::<Option<Vec<GenericArg<'tcx>>>>()
+        else {
+            return Err(format!("target {did:?}'s exact args could not be resolved"));
+        };
+        let args = tcx.mk_args(&args);
+        if args.len() != tcx.generics_of(did).count() {
+            return Err(format!("target {did:?}'s exact args could not be resolved (wrong count)"));
+        }
+        let instance = match Instance::try_resolve(tcx, env, did, args) {
+            Ok(Some(i)) if i.def_id() == did => i,
+            other => {
+                return Err(format!("target {did:?} could not be resolved as exact instance: {other:?}"));
+            }
+        };
+        if !self.can_reference(instance) {
+            return Err(format!("target {instance:?} is not linkable from here"));
+        }
+        let parent = tcx.parent(did);
+        let raw_self_ty = if tcx.def_kind(parent) == DefKind::Trait {
+            args.type_at(0)
+        } else {
+            tcx.type_of(parent).instantiate(tcx, args)
+        };
+        let Ok(self_ty) = tcx.try_normalize_erasing_regions(env, raw_self_ty) else {
+            return Err(format!("target {did:?}'s Self type could not be normalized"));
+        };
+        let fnc = Operand::Constant(Box::new(ConstOperand {
+            span,
+            user_ty: None,
+            const_: Const::zero_sized(Ty::new_fn_def(tcx, did, args)),
+        }));
+        Ok(Cand { instance, fnc, self_ty })
     }
 
     /// For a Pointers candidate: the callee must be referenceable, and so must

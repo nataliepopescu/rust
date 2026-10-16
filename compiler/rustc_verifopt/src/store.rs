@@ -1,6 +1,6 @@
 //! The analysis -> rewrite store, and its on-disk JSON encoding.
 
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_span::def_id::DefPathHash;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,13 @@ pub struct Store {
     /// differently configured build and none of its keys can match - which
     /// otherwise fails silently. See `crate_id_mismatch`.
     pub crates: FxHashMap<String, u64>,
+    /// Sites whose single target is an *exact instance*: its argument hashes
+    /// are that function's own generic args (from the instance manifests),
+    /// not - as for every other target - the Self ADT's args. The analysis
+    /// records these where CHAmax shows exactly one instance in the whole
+    /// program can be reached (a provably single target, even where FSA fell
+    /// back to CHA), and the rewrite builds that instance as is.
+    pub exact: FxHashSet<SiteKey>,
 }
 
 /// Where the analysis writes the store and the rewrite reads it:
@@ -78,6 +85,8 @@ struct SerStore {
     shapes: Vec<(HashBytes, ArgShape)>,
     #[serde(default)]
     crates: Vec<(String, u64)>,
+    #[serde(default)]
+    exact: Vec<SerKey>,
 }
 
 fn ser_vec(v: &[DefPathHash]) -> Vec<HashBytes> {
@@ -128,6 +137,7 @@ impl Store {
                 .collect(),
             shapes: self.shapes.iter().map(|(h, s)| (HashBytes::from(*h), s.clone())).collect(),
             crates: self.crates.iter().map(|(n, id)| (n.clone(), *id)).collect(),
+            exact: self.exact.iter().map(ser_key).collect(),
         };
         serde_json::to_string(&ser).map_err(|e| e.to_string())
     }
@@ -161,6 +171,7 @@ impl Store {
                 .collect(),
             shapes: ser.shapes.into_iter().map(|(h, s)| (DefPathHash::from(h), s)).collect(),
             crates: ser.crates.into_iter().collect(),
+            exact: ser.exact.into_iter().map(de_key).collect(),
         })
     }
 }

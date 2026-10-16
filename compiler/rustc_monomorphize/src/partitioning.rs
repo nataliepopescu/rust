@@ -1165,7 +1165,12 @@ fn write_verifopt_instance_manifest<'tcx>(tcx: TyCtxt<'tcx>, items: &[MonoItem<'
     }
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let crate_id = tcx.stable_crate_id(LOCAL_CRATE).as_u64();
-    let manifest = rustc_verifopt::InstanceManifest { crate_name: crate_name.clone(), crate_id, instances };
+    let manifest = rustc_verifopt::InstanceManifest {
+        crate_name: crate_name.clone(),
+        crate_id,
+        instances,
+        shapes: scratch_shapes.snapshot(),
+    };
     let dir = rustc_verifopt::manifest_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("{crate_name}-{crate_id:016x}.json"));
