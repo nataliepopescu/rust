@@ -221,7 +221,21 @@ enum Edit {
     Tagged(Vec<(usize, usize, u64, DefPathHash, Option<Vec<DefPathHash>>)>),
 }
 
-const MAX_POINTERS_CANDIDATES: usize = 4;
+/// Up to how many candidates a Pointers rewrite compares the vtable slot
+/// against (a site with more targets isn't rewritten; a longer expanded list
+/// is cut to this - any subset is sound). Default 4; override with the
+/// VERIFOPT_MAX_CANDIDATES environment variable, which `cargo verifopt
+/// --max-candidates N` sets for every rustc it starts.
+fn max_pointers_candidates() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("VERIFOPT_MAX_CANDIDATES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(4)
+    })
+}
 
 /// Sentinel hash -> shape, for every type this process hashed itself or read
 /// from the store (see load_shared_store). The hashing scheme itself lives in
@@ -290,7 +304,7 @@ fn compute_edits<'tcx>(
             } else if let Some(tags) = tags {
                 // tag dyn casts and switchint
                 Some((bb.as_usize(), Edit::Tagged(tags.to_vec())))
-            } else if targets.len() > 1 && targets.len() <= MAX_POINTERS_CANDIDATES {
+            } else if targets.len() > 1 && targets.len() <= max_pointers_candidates() {
                 // direct conditionals on pointers
                 Some((bb.as_usize(), Edit::Pointers(targets.to_vec())))
             } else {
@@ -1232,7 +1246,7 @@ impl<'tcx> Linkable<'tcx> {
     /// Every candidate for a Pointers rewrite of one site: each recorded
     /// target's candidates (see candidates_for), with targets that yield none
     /// dropped - sound, since unmatched objects take the original dyn call -
-    /// deduplicated, and capped at MAX_POINTERS_CANDIDATES (any subset is
+    /// deduplicated, and capped at max_pointers_candidates() (any subset is
     /// sound too). Err only if nothing at all is usable.
     fn pointer_candidates(
         &self,
@@ -1272,15 +1286,16 @@ impl<'tcx> Linkable<'tcx> {
                 dropped.first().map(String::as_str).unwrap_or("no targets")
             ));
         }
-        if cands.len() > MAX_POINTERS_CANDIDATES {
+        let max = max_pointers_candidates();
+        if cands.len() > max {
             debug!(
                 "[verifopt debug][apply_edits] {:?} {:?}: {} candidates, keeping the first {}",
                 caller.def_id(),
                 bb,
                 cands.len(),
-                MAX_POINTERS_CANDIDATES
+                max
             );
-            cands.truncate(MAX_POINTERS_CANDIDATES);
+            cands.truncate(max);
         }
         Ok(cands)
     }
