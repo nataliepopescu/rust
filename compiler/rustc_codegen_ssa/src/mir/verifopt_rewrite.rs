@@ -615,8 +615,25 @@ fn apply_edits<'tcx>(
                 let trait_ref = match pointee_ty.kind() {
                     ty::Dynamic(preds, _) => {
                         DYNAMIC_HITS.fetch_add(1, Ordering::Relaxed);
-                        let principal = preds.principal().unwrap();
-                        principal.with_self_ty(tcx, pointee_ty).skip_binder()
+                        let Some(principal) = preds.principal() else {
+                            log_skip(
+                                tcx,
+                                instance,
+                                bb,
+                                "not_dyn",
+                                &format!("receiver pointee {pointee_ty:?} has no principal trait"),
+                            );
+                            continue;
+                        };
+                        // Erase, don't skip, the binder: a higher-ranked trait
+                        // object - e.g. hashbrown's `dyn for<'a> Fn(&'a mut
+                        // RawTableInner, usize) -> u64` - has bound lifetimes in
+                        // its trait ref, and skip_binder() leaves them escaping,
+                        // which vtable_entries rejects (ICE: "has escaping bound
+                        // vars, so it cannot be wrapped in a dummy binder").
+                        // Vtable layout doesn't depend on lifetimes; rustc's own
+                        // vtable code erases them the same way.
+                        tcx.instantiate_bound_regions_with_erased(principal.with_self_ty(tcx, pointee_ty))
                     }
                     _ => {
                         log_skip(tcx, instance, bb, "not_dyn", &format!("receiver pointee {pointee_ty:?} is not dyn"));
