@@ -237,6 +237,19 @@ fn max_pointers_candidates() -> usize {
     })
 }
 
+/// Whether a single-target site that isn't proven single (not in
+/// Store::exact) may still be rewritten as an unguarded direct call. Off by
+/// default: such a target comes from the analysis' FSA, which can miss
+/// real targets (e.g. receivers only reached through fn pointers, like
+/// `Formatter::write_fmt`'s writer via `fmt::rt::Argument`), and an
+/// unguarded call to a wrong target is unsound. Without it those sites get
+/// a guarded Pointers rewrite (compare, direct call, dyn fallback). Set by
+/// `cargo verifopt --unguarded-single` (VERIFOPT_UNGUARDED_SINGLE).
+fn allow_unguarded_single() -> bool {
+    static ALLOW: OnceLock<bool> = OnceLock::new();
+    *ALLOW.get_or_init(|| std::env::var_os("VERIFOPT_UNGUARDED_SINGLE").is_some())
+}
+
 /// Sentinel hash -> shape, for every type this process hashed itself or read
 /// from the store (see load_shared_store). The hashing scheme itself lives in
 /// rustc_verifopt, shared with the analysis plugin.
@@ -299,9 +312,12 @@ fn compute_edits<'tcx>(
             {
                 // a provably single target, given as an exact instance
                 Some((bb.as_usize(), Edit::SingleExact(targets[0].0, args.clone())))
-            } else if targets.len() == 1 {
-                // directly swap terminator
+            } else if targets.len() == 1 && allow_unguarded_single() {
+                // directly swap terminator (opt-in: not proven single)
                 Some((bb.as_usize(), Edit::Single(targets[0].0, targets[0].1.clone())))
+            } else if targets.len() == 1 {
+                // not proven single: guard the call, with the dyn call as fallback
+                Some((bb.as_usize(), Edit::Pointers(targets.to_vec())))
             } else if let Some(tags) = tags {
                 // tag dyn casts and switchint
                 Some((bb.as_usize(), Edit::Tagged(tags.to_vec())))
